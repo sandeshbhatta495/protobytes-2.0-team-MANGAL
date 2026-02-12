@@ -1,0 +1,99 @@
+{
+  "name": "जन्म दर्ता निवेदन",
+  "category": "civil_registration",
+  "required_fields": [
+    "child_name",
+    "child_name_en",
+    "father_name",
+    "mother_name",
+    "dob",
+    "birth_place",
+    "province",
+    "district",
+    "municipality",
+    "ward",
+    "grandfather_name",
+    "grandmother_name"
+  ],
+  "form_fields": [
+    {
+      "id": "child_name",
+      "label": "बच्चाको नाम (नेपाली)",
+      "type": "text",
+      "required": true
+    },
+    {
+      "id": "child_name_en",
+      "label": "बच्चाको नाम (English)",
+      "type": "text",
+      "required": true
+    },
+    {
+      "id": "father_name",
+      "label": "पिताको नाम",
+      "type": "text",
+      "required": true
+    },
+    {
+      "id": "mother_name",
+      "label": "माताको नाम",
+      "type": "text",
+      "required": true
+    },
+    {
+      "id": "dob",
+      "label": "जन्म मिति",
+      "type": "date",
+      "required": true
+    },
+    {
+      "id": "birth_place",
+      "label": "जन्म स्थान",
+      "type": "text",
+      "required": true
+    },
+    {
+      "id": "province",
+      "label": "प्रदेश",
+      "type": "select",
+      "required": true
+    },
+    {
+      "id": "district",
+      "label": "जिल्ला",
+      "type": "select",
+      "required": true
+    },
+    {
+      "id": "municipality",
+      "label": "नगरपालिका/गाउँपालिका",
+      "type": "select",
+      "required": true
+    },
+    {
+      "id": "ward",
+      "label": "वडा नं.",
+      "type": "number",
+      "required": true
+    },
+    {
+      "id": "grandfather_name",
+      "label": "हजुरबाको नाम",
+      "type": "text",
+      "required": false
+    },
+    {
+      "id": "grandmother_name",
+      "label": "हजुरआमाको नाम",
+      "type": "text",
+      "required": false
+    }
+  ],
+  "content": "माननीय वडा अध्यक्षज्यू,\n\nवडा नं. {ward}\n{municipality}\n{district}\n{province}\n\nविषय: जन्म दर्ताको निवेदन\n\nमेरो सन्तान {child_name} ({child_name_en}) को जन्म भएको {dob} मा स्थान {birth_place} मा भएको हो।\n\nविवरण:\n\n१. सन्तानको नाम: {child_name} ({child_name_en})\n२. जन्म मिति: {dob}\n३. जन्म स्थान: {birth_place}\n४. पिताको नाम: {father_name}\n५. माताको नाम: {mother_name}\n६. हजुरबाको नाम: {grandfather_name}\n७. हजुरआमाको नाम: {grandmother_name}\n८. स्थायी ठेगाना: {province}, {district}, {municipality}, वडा नं. {ward}\n\nयस्तो, माथि उल्लिखित विवरण अनुसार मेरो सन्तानको जन्म दर्ता गरिदिनुहुन विनम्र निवेदन गर्दछु।\n\nनिवेदक,\n{father_name}\n{mother_name}\nसम्पर्क: [सम्पर्क नं.]\n\nमिति: {date_bs}",
+  "instructions": [
+    "बच्चाको पूरा नाम नेपाली र अंग्रेजी दुवैमा लेख्नुहोस्",
+    "जन्म मिति बिक्रम सम्वत् र इस्वी संवत् दुवैमा उल्लेख गर्नुहोस्",
+    "जन्म स्थानको ठेगाना स्पष्ट लेख्नुहोस्",
+    "बाबुआमाको पूरा नाम र नागरिकता नं. उल्लेख गर्नुहोस्"
+  ]
+}

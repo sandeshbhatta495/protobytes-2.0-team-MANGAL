@@ -1,0 +1,83 @@
+{
+    "name": "विवाह दर्ताको निवेदन",
+    "category": "civil_registration",
+    "required_fields": [
+        "groom_name",
+        "groom_father",
+        "bride_name",
+        "bride_father",
+        "marriage_date",
+        "marriage_place",
+        "province",
+        "district",
+        "municipality",
+        "ward"
+    ],
+    "form_fields": [
+        {
+            "id": "groom_name",
+            "label": "दुलाहाको नाम",
+            "type": "text",
+            "required": true
+        },
+        {
+            "id": "groom_father",
+            "label": "दुलाहाको पिताको नाम",
+            "type": "text",
+            "required": true
+        },
+        {
+            "id": "bride_name",
+            "label": "दुलहीको नाम",
+            "type": "text",
+            "required": true
+        },
+        {
+            "id": "bride_father",
+            "label": "दुलहीको पिताको नाम",
+            "type": "text",
+            "required": true
+        },
+        {
+            "id": "marriage_date",
+            "label": "विवाह मिति",
+            "type": "date",
+            "required": true
+        },
+        {
+            "id": "marriage_place",
+            "label": "विवाह स्थान",
+            "type": "text",
+            "required": true
+        },
+        {
+            "id": "province",
+            "label": "प्रदेश",
+            "type": "select",
+            "required": true
+        },
+        {
+            "id": "district",
+            "label": "जिल्ला",
+            "type": "select",
+            "required": true
+        },
+        {
+            "id": "municipality",
+            "label": "नगरपालिका/गाउँपालिका",
+            "type": "select",
+            "required": true
+        },
+        {
+            "id": "ward",
+            "label": "वडा नं.",
+            "type": "number",
+            "required": true
+        }
+    ],
+    "content": "माननीय वडा अध्यक्षज्यू,\n\nवडा नं. {ward}\n{municipality}\n{district}\n{province}\n\nविषय: विवाह दर्ता गरिपाउँ।\n\nमहोदय,\n\nहामी दुवैले मिति {marriage_date} मा सामाजिक/धार्मिक परम्परा अनुसार {marriage_place} मा विवाह सम्पन्न गरेको हुँदा हाम्रो विवाह दर्ता गरिदिनुहुन यो संयुक्त निवेदन पेश गरेका छौं।\n\nदुलाहाको विवरण:\nनाम: {groom_name}\nपिता: {groom_father}\n\nदुलहीको विवरण:\nनाम: {bride_name}\nपिता: {bride_father}\n\nनिवेदकहरु,\n{groom_name} (दुलाहा)\n{bride_name} (दुलही)\nमिति: {date_bs}",
+    "instructions": [
+        "दुवै पक्षको नागरिकता विवरण अनिवार्य छ",
+        "विवाह मिति यकिन गरि लेख्नुहोस्"
+    ]
+}

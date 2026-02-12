@@ -1,0 +1,91 @@
+{
+    "name": "खानेपानी जडान निवेदन",
+    "category": "infrastructure",
+    "required_fields": [
+        "applicant_name",
+        "father_name",
+        "grandfather_name",
+        "province",
+        "district",
+        "municipality",
+        "ward",
+        "tole",
+        "house_no",
+        "kitta_no",
+        "contact_no"
+    ],
+    "form_fields": [
+        {
+            "id": "applicant_name",
+            "label": "निवेदकको नाम",
+            "type": "text",
+            "required": true
+        },
+        {
+            "id": "father_name",
+            "label": "बुबाको नाम",
+            "type": "text",
+            "required": true
+        },
+        {
+            "id": "grandfather_name",
+            "label": "हजुरबुबाको नाम",
+            "type": "text",
+            "required": true
+        },
+        {
+            "id": "province",
+            "label": "प्रदेश",
+            "type": "select",
+            "required": true
+        },
+        {
+            "id": "district",
+            "label": "जिल्ला",
+            "type": "select",
+            "required": true
+        },
+        {
+            "id": "municipality",
+            "label": "नगरपालिका/गाउँपालिका",
+            "type": "select",
+            "required": true
+        },
+        {
+            "id": "ward",
+            "label": "वडा नं.",
+            "type": "number",
+            "required": true
+        },
+        {
+            "id": "tole",
+            "label": "टोल",
+            "type": "text",
+            "required": true
+        },
+        {
+            "id": "house_no",
+            "label": "घर नं.",
+            "type": "text",
+            "required": true
+        },
+        {
+            "id": "kitta_no",
+            "label": "कित्ता नं.",
+            "type": "text",
+            "required": true
+        },
+        {
+            "id": "contact_no",
+            "label": "सम्पर्क नम्बर",
+            "type": "tel",
+            "required": true
+        }
+    ],
+    "content": "श्रीमान् प्रमुखज्यू,\nखानेपानी तथा सरसफाई उपभोक्ता समिति/संस्थान,\n{municipality}, {district}।\n\nविषय: खानेपानी धारा जडान गरिपाउँ।\n\nमहोदय,\n\nम निवेदक {applicant_name}, पिता {father_name}, हजुरबुबा {grandfather_name}, {province}, {district}, {municipality} वडा नं. {ward}, {tole} स्थित कित्ता नं. {kitta_no} को घरमा (घर नं. {house_no}) खानेपानीको धारा जडान गर्न इच्छुक भएकोले नियमानुसारको प्रक्रिया पुरा गरी धारा जडान गरिदिनुहुन अनुरोध गर्दछु।\n\nनिवेदक,\n{applicant_name}\nसम्पर्क: {contact_no}\nमिति: {date_bs}",
+    "instructions": [
+        "जग्गाधनी प्रमाण पुर्जाको प्रतिलिपि",
+        "नागरिकताको प्रतिलिपि",
+        "घरको नक्सा पास प्रमाणपत्र"
+    ]
+}
