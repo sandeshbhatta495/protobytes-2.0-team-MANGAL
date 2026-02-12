@@ -1,6 +1,27 @@
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, RedirectResponse
+import uvicorn
 import os
 from dotenv import load_dotenv
 import json
+
+# Configure FFmpeg path from imageio_ffmpeg before importing audio libraries
+try:
+    import imageio_ffmpeg
+    import shutil
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    ffmpeg_dir = os.path.dirname(ffmpeg_exe)
+    # Create a copy named ffmpeg.exe if it doesn't exist (libraries look for 'ffmpeg')
+    ffmpeg_standard = os.path.join(ffmpeg_dir, "ffmpeg.exe")
+    if not os.path.exists(ffmpeg_standard) and os.path.exists(ffmpeg_exe):
+        shutil.copy2(ffmpeg_exe, ffmpeg_standard)
+    os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+    # Also set FFMPEG_BINARY for pydub
+    os.environ["FFMPEG_BINARY"] = ffmpeg_standard if os.path.exists(ffmpeg_standard) else ffmpeg_exe
+except ImportError:
+    pass  # FFmpeg should be in system PATH
 
 # Load environment variables from .env file
 # Load environment variables from .env.config file (since .env is used as venv dir)
@@ -24,8 +45,16 @@ from datetime import datetime
 import google.generativeai as genai
 from pydantic import BaseModel
 import asyncio
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.lib.units import inch
 import textwrap
 import logging
+
+# Import our custom Nepali ASR module
+from nepali_asr import get_nepali_asr
 
 
 # Configure logging
@@ -477,4 +506,314 @@ def offline_transliterate(text: str) -> str:
             i += 1
     
     return ''.join(result)
+
+# adding the correct_nepali_grammer uses gemini
+async def correct_nepali_grammar(text: str, context: str = "") -> str:
+    """Post-process Nepali text for grammar correction using Gemini."""
+    if not gemini_model or not text or not text.strip():
+        return text
+    try:
+        ctx_hint = f" (यो फिल्ड: {context})" if context else ""
+        prompt = (
+            "तपाईंलाई नेपाली पाठ दिइएको छ। कृपया यसलाई शुद्ध नेपाली व्याकरणमा सच्याउनुहोस्।\n"
+            "- मात्रा, हलन्त, र विसर्ग ठीक गर्नुहोस्\n"
+            "- शब्द क्रम र विभक्ति मिलाउनुहोस्\n"
+            "- अर्थ नबिगार्नुहोस्, केवल व्याकरण सच्याउनुहोस्\n"
+            "- केवल सच्याइएको नेपाली पाठ मात्र फर्काउनुहोस्, अरू केही नलेख्नुहोस्\n"
+            f"{ctx_hint}\n\n"
+            f"पाठ: {text}\n\n"
+            "शुद्ध पाठ:"
+        )
+        # Run synchronous Gemini call in threadpool to avoid blocking the event loop
+        response = await asyncio.to_thread(gemini_model.generate_content, prompt)
+        corrected = response.text.strip()
+        # Sanity check: if Gemini returned something wildly different or empty, keep original
+        if not corrected or len(corrected) > len(text) * 3:
+            return text
+        logger.info(f"Grammar correction: '{text[:40]}' -> '{corrected[:40]}'")
+        return corrected
+    except Exception as e:
+        logger.warning(f"Grammar correction failed, returning original: {e}")
+        return text
+
+#adding rate limiting logic
+
+_grammar_rate_limit_store: Dict[str, list] = {}
+GRAMMAR_RATE_LIMIT_MAX_REQUESTS = 10  # Max requests per window
+GRAMMAR_RATE_LIMIT_WINDOW_SECONDS = 60  # Time window in seconds
+MAX_GRAMMAR_TEXT_LENGTH = 5000  # Maximum text length for grammar correction
+
+
+def check_rate_limit(client_ip: str) -> bool:
+    """Check if client is within rate limit. Returns True if allowed, False if limited."""
+    now = datetime.now().timestamp()
+    window_start = now - GRAMMAR_RATE_LIMIT_WINDOW_SECONDS
+    
+    if client_ip not in _grammar_rate_limit_store:
+        _grammar_rate_limit_store[client_ip] = []
+    
+    # Clean old entries
+    _grammar_rate_limit_store[client_ip] = [
+        ts for ts in _grammar_rate_limit_store[client_ip] if ts > window_start
+    ]
+    
+    # Check limit
+    if len(_grammar_rate_limit_store[client_ip]) >= GRAMMAR_RATE_LIMIT_MAX_REQUESTS:
+        return False
+    
+    # Record this request
+    _grammar_rate_limit_store[client_ip].append(now)
+    return True
+
+
+# RMmaking correct-grammer end point avialiable
+
+@app.post("/correct-grammar")
+async def correct_grammar_endpoint(request: GrammarCorrectionRequest, req: Request):
+    """Correct Nepali grammar in the given text using Gemini AI"""
+    # Get client IP for rate limiting
+    client_ip = req.client.host if req.client else "unknown"
+    
+    # Check rate limit
+    if not check_rate_limit(client_ip):
+        raise HTTPException(
+            status_code=429, 
+            detail="Too many requests. Please wait before trying again."
+        )
+    
+    # Validate text length
+    if len(request.text) > MAX_GRAMMAR_TEXT_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Text too long. Maximum {MAX_GRAMMAR_TEXT_LENGTH} characters allowed."
+        )
+    
+    corrected = await correct_nepali_grammar(request.text, request.context)
+    return {"original": request.text, "corrected": corrected}
+
+# To-do
+@app.post("/recognize-handwriting")
+async def recognize_handwriting(request: HandwritingRequest):
+    pass
+
+
+# Basic logit to convert date
+def convert_to_bikram_sambat(date_gregorian: str) -> str:
+    """Convert Gregorian date to Bikram Sambat (approximate)"""
+    try:
+        dt = datetime.strptime(date_gregorian, "%Y-%m-%d")
+        # Approximate BS = AD + 56 years 8 months
+        bs_year = dt.year + 56
+        bs_month = dt.month + 8
+        bs_day = dt.day + 16
+        if bs_day > 30:
+            bs_day -= 30
+            bs_month += 1
+        if bs_month > 12:
+            bs_month -= 12
+            bs_year += 1
+        return f"{bs_year}-{bs_month:02d}-{bs_day:02d}"
+    except:
+        return date_gregorian
+
+
+# Register Nepali font once at module level
+_nepali_font_registered = False
+_nepali_font_name = 'Helvetica'
+
+def _ensure_nepali_font():
+    global _nepali_font_registered, _nepali_font_name
+    if _nepali_font_registered:
+        return _nepali_font_name
+    try:
+        nepali_font_path = os.path.join(BASE_DIR, 'static', 'fonts', 'NotoSansDevanagari-Regular.ttf')
+        if os.path.exists(nepali_font_path):
+            pdfmetrics.registerFont(TTFont('NotoSansDevanagari', nepali_font_path))
+            _nepali_font_name = 'NotoSansDevanagari'
+            logger.info(f"Nepali font registered from {nepali_font_path}")
+        else:
+            logger.warning(f"Nepali font not found at {nepali_font_path}")
+    except Exception as e:
+        logger.warning(f"Could not register Nepali font: {e}")
+    _nepali_font_registered = True
+    return _nepali_font_name
+
+## Needs fixing 
+## Like a lot
+async def generate_pdf(content: str, document_type: str, user_data: Dict) -> str:
+    """Generate PDF document with proper Nepali layout"""
+    output_dir = os.path.join(BASE_DIR, "generated_documents")
+    os.makedirs(output_dir, exist_ok=True)
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{document_type}_{timestamp}.pdf"
+    filepath = os.path.join(output_dir, filename)
+    
+    c = canvas.Canvas(filepath, pagesize=A4)
+    width, height = A4
+    font_name = _ensure_nepali_font()
+    
+    # --- PAGE HEADER ---
+    # Nepal Government Header
+    c.setFont(font_name, 14)
+    c.drawCentredString(width / 2, height - 0.7 * inch, "नेपाल सरकार")
+    
+    # Municipality from user data or default
+    municipality = user_data.get('municipality', '')
+    district = user_data.get('district', '')
+    province = user_data.get('province', '')
+    ward = user_data.get('ward', '')
+    
+    c.setFont(font_name, 16)
+    header_text = municipality if municipality else "स्थानीय तह"
+    c.drawCentredString(width / 2, height - 1.0 * inch, header_text)
+    
+    c.setFont(font_name, 11)
+    if district and province:
+        c.drawCentredString(width / 2, height - 1.25 * inch, f"{district}, {province}")
+    
+    if ward:
+        c.setFont(font_name, 11)
+        c.drawCentredString(width / 2, height - 1.45 * inch, f"वडा नं. {ward} को कार्यालय")
+    
+    # Horizontal line
+    c.setStrokeColorRGB(0, 0, 0)
+    c.setLineWidth(1)
+    c.line(0.75 * inch, height - 1.6 * inch, width - 0.75 * inch, height - 1.6 * inch)
+    
+    # Subject
+    c.setFont(font_name, 12)
+    subject = f"विषय: {get_document_subject(document_type)}"
+    c.drawString(inch, height - 1.9 * inch, subject)
+    
+    # Date on the right
+    date_bs = convert_to_bikram_sambat(datetime.now().strftime('%Y-%m-%d'))
+    c.setFont(font_name, 10)
+    c.drawRightString(width - inch, height - 1.9 * inch, f"मिति: {date_bs}")
+    
+    # --- BODY CONTENT ---
+    c.setFont(font_name, 11)
+    y_position = height - 2.3 * inch
+    
+    lines = content.split('\n')
+    for line in lines:
+        if line.strip():
+            # Nepali text wrapping: use ~55 chars per line for proper fit
+            wrapped_lines = textwrap.wrap(line, width=55) if len(line) > 55 else [line]
+            for wrapped_line in wrapped_lines:
+                if y_position < 2.5 * inch:
+                    # New page
+                    c.showPage()
+                    c.setFont(font_name, 11)
+                    y_position = height - inch
+                c.drawString(inch, y_position, wrapped_line)
+                y_position -= 0.22 * inch
+        else:
+            y_position -= 0.12 * inch
+    
+    # --- FOOTER / SIGNATURES ---
+    # Make sure signature section is at bottom
+    if y_position < 3.5 * inch:
+        c.showPage()
+        c.setFont(font_name, 11)
+        y_position = height - inch
+    
+    sig_y = 2.2 * inch
+    c.setFont(font_name, 10)
+    
+    # Left: applicant
+    c.drawString(inch, sig_y + 0.3 * inch, "..............................")
+    c.drawString(inch, sig_y, "निवेदकको हस्ताक्षर")
+    
+    # Right: authority  
+    c.drawString(width - 3 * inch, sig_y + 0.3 * inch, "..............................")
+    c.drawString(width - 3 * inch, sig_y, "प्रमाणिकरण अधिकारी")
+    
+    # Bottom line
+    c.setFont(font_name, 8)
+    c.drawCentredString(width / 2, 0.5 * inch, "यो दस्तावेज सरकारी-सारथी AI Digital Scribe मार्फत उत्पन्न गरिएको हो।")
+    
+    c.save()
+    logger.info(f"PDF generated: {filepath}")
+    return filepath
+
+def get_document_subject(document_type: str) -> str:
+    """Get Nepali subject line for document type"""
+    subjects = {
+        "birth_registration": "जन्म दर्ताको निवेदन",
+        "death_registration": "मृत्यु दर्ताको निवेदन", 
+        "marriage_registration": "विवाह दर्ताको निवेदन",
+        "migration_certificate": "बसाइसराई प्रमाणपत्रको निवेदन",
+        "residence_certificate": "बसोबास प्रमाणपत्रको निवेदन",
+        "electricity_connection": "विद्युत जडानको निवेदन",
+        "water_connection": "खानेपानी जडानको निवेदन",
+        "road_access": "बाटो पहुँचको निवेदन"
+    }
+    return subjects.get(document_type, "निवेदन")
+
+
+@app.get("/templates")
+async def list_templates():
+    """List loaded template keys (for debugging)."""
+    return {"loaded": list(templates.keys()), "count": len(templates)}
+
+
+@app.get("/document-types")
+async def get_document_types():
+    """Get available document types"""
+    return {
+        "document_types": list(templates.keys()),
+        "categories": {
+            "civil_registration": ["birth_registration", "death_registration", "marriage_registration", "divorce_registration"],
+            "recommendation": ["migration_certificate", "residence_certificate"],
+            "infrastructure": ["electricity_connection", "water_connection", "road_access"]
+        }
+    }
+
+@app.get("/locations")
+async def get_locations():
+    """Get Nepal administrative division data"""
+    try:
+        location_file = os.path.join(BASE_DIR, "locations.json")
+        if os.path.exists(location_file):
+            with open(location_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return {"error": "Locations file not found"}
+    except Exception as e:
+        logger.error(f"Error serving locations: {e}")
+        raise HTTPException(status_code=500, detail="Error loading location data")
+
+@app.get("/template/{document_type}")
+async def get_template(document_type: str):
+    """Get pattern definition for a specific document type"""
+    if document_type not in templates:
+        raise HTTPException(status_code=404, detail="Template not found")
+    return templates[document_type]
+
+
+if __name__ == "__main__":
+    import socket
+    import sys
+    
+    # Find available port starting from 8000
+    def find_available_port(start_port=8000):
+        for port in range(start_port, start_port + 10):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.bind(('localhost', port))
+                    s.close()
+                    return port
+            except OSError:
+                continue
+        return None
+    
+    available_port = find_available_port()
+    if available_port:
+        print(f"Starting server on port {available_port}")
+        print(f"API docs at: http://localhost:{available_port}/docs")
+        uvicorn.run(app, host="0.0.0.0", port=available_port)
+    else:
+        print("❌ No available ports found in range 8000-8010")
+        print("Please close some applications and try again")
+        sys.exit(1)
 
