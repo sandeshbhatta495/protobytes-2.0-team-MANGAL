@@ -616,6 +616,140 @@ def convert_to_bikram_sambat(date_gregorian: str) -> str:
     except:
         return date_gregorian
 
+
+# Register Nepali font once at module level
+_nepali_font_registered = False
+_nepali_font_name = 'Helvetica'
+
+def _ensure_nepali_font():
+    global _nepali_font_registered, _nepali_font_name
+    if _nepali_font_registered:
+        return _nepali_font_name
+    try:
+        nepali_font_path = os.path.join(BASE_DIR, 'static', 'fonts', 'NotoSansDevanagari-Regular.ttf')
+        if os.path.exists(nepali_font_path):
+            pdfmetrics.registerFont(TTFont('NotoSansDevanagari', nepali_font_path))
+            _nepali_font_name = 'NotoSansDevanagari'
+            logger.info(f"Nepali font registered from {nepali_font_path}")
+        else:
+            logger.warning(f"Nepali font not found at {nepali_font_path}")
+    except Exception as e:
+        logger.warning(f"Could not register Nepali font: {e}")
+    _nepali_font_registered = True
+    return _nepali_font_name
+
+async def generate_pdf(content: str, document_type: str, user_data: Dict) -> str:
+    """Generate PDF document with proper Nepali layout"""
+    output_dir = os.path.join(BASE_DIR, "generated_documents")
+    os.makedirs(output_dir, exist_ok=True)
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{document_type}_{timestamp}.pdf"
+    filepath = os.path.join(output_dir, filename)
+    
+    c = canvas.Canvas(filepath, pagesize=A4)
+    width, height = A4
+    font_name = _ensure_nepali_font()
+    
+    # --- PAGE HEADER ---
+    # Nepal Government Header
+    c.setFont(font_name, 14)
+    c.drawCentredString(width / 2, height - 0.7 * inch, "नेपाल सरकार")
+    
+    # Municipality from user data or default
+    municipality = user_data.get('municipality', '')
+    district = user_data.get('district', '')
+    province = user_data.get('province', '')
+    ward = user_data.get('ward', '')
+    
+    c.setFont(font_name, 16)
+    header_text = municipality if municipality else "स्थानीय तह"
+    c.drawCentredString(width / 2, height - 1.0 * inch, header_text)
+    
+    c.setFont(font_name, 11)
+    if district and province:
+        c.drawCentredString(width / 2, height - 1.25 * inch, f"{district}, {province}")
+    
+    if ward:
+        c.setFont(font_name, 11)
+        c.drawCentredString(width / 2, height - 1.45 * inch, f"वडा नं. {ward} को कार्यालय")
+    
+    # Horizontal line
+    c.setStrokeColorRGB(0, 0, 0)
+    c.setLineWidth(1)
+    c.line(0.75 * inch, height - 1.6 * inch, width - 0.75 * inch, height - 1.6 * inch)
+    
+    # Subject
+    c.setFont(font_name, 12)
+    subject = f"विषय: {get_document_subject(document_type)}"
+    c.drawString(inch, height - 1.9 * inch, subject)
+    
+    # Date on the right
+    date_bs = convert_to_bikram_sambat(datetime.now().strftime('%Y-%m-%d'))
+    c.setFont(font_name, 10)
+    c.drawRightString(width - inch, height - 1.9 * inch, f"मिति: {date_bs}")
+    
+    # --- BODY CONTENT ---
+    c.setFont(font_name, 11)
+    y_position = height - 2.3 * inch
+    
+    lines = content.split('\n')
+    for line in lines:
+        if line.strip():
+            # Nepali text wrapping: use ~55 chars per line for proper fit
+            wrapped_lines = textwrap.wrap(line, width=55) if len(line) > 55 else [line]
+            for wrapped_line in wrapped_lines:
+                if y_position < 2.5 * inch:
+                    # New page
+                    c.showPage()
+                    c.setFont(font_name, 11)
+                    y_position = height - inch
+                c.drawString(inch, y_position, wrapped_line)
+                y_position -= 0.22 * inch
+        else:
+            y_position -= 0.12 * inch
+    
+    # --- FOOTER / SIGNATURES ---
+    # Make sure signature section is at bottom
+    if y_position < 3.5 * inch:
+        c.showPage()
+        c.setFont(font_name, 11)
+        y_position = height - inch
+    
+    sig_y = 2.2 * inch
+    c.setFont(font_name, 10)
+    
+    # Left: applicant
+    c.drawString(inch, sig_y + 0.3 * inch, "..............................")
+    c.drawString(inch, sig_y, "निवेदकको हस्ताक्षर")
+    
+    # Right: authority  
+    c.drawString(width - 3 * inch, sig_y + 0.3 * inch, "..............................")
+    c.drawString(width - 3 * inch, sig_y, "प्रमाणिकरण अधिकारी")
+    
+    # Bottom line
+    c.setFont(font_name, 8)
+    c.drawCentredString(width / 2, 0.5 * inch, "यो दस्तावेज सरकारी-सारथी AI Digital Scribe मार्फत उत्पन्न गरिएको हो।")
+    
+    c.save()
+    logger.info(f"PDF generated: {filepath}")
+    return filepath
+
+def get_document_subject(document_type: str) -> str:
+    """Get Nepali subject line for document type"""
+    subjects = {
+        "birth_registration": "जन्म दर्ताको निवेदन",
+        "death_registration": "मृत्यु दर्ताको निवेदन", 
+        "marriage_registration": "विवाह दर्ताको निवेदन",
+        "migration_certificate": "बसाइसराई प्रमाणपत्रको निवेदन",
+        "residence_certificate": "बसोबास प्रमाणपत्रको निवेदन",
+        "electricity_connection": "विद्युत जडानको निवेदन",
+        "water_connection": "खानेपानी जडानको निवेदन",
+        "road_access": "बाटो पहुँचको निवेदन"
+    }
+    return subjects.get(document_type, "निवेदन")
+
+
 if __name__ == "__main__":
     import socket
     import sys
