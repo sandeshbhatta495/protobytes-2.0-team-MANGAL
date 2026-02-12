@@ -752,6 +752,45 @@ def get_document_subject(document_type: str) -> str:
     return subjects.get(document_type, "निवेदन")
 
 
+@app.get("/templates")
+async def list_templates():
+    """List loaded template keys (for debugging)."""
+    return {"loaded": list(templates.keys()), "count": len(templates)}
+
+
+@app.get("/document-types")
+async def get_document_types():
+    """Get available document types"""
+    return {
+        "document_types": list(templates.keys()),
+        "categories": {
+            "civil_registration": ["birth_registration", "death_registration", "marriage_registration", "divorce_registration"],
+            "recommendation": ["migration_certificate", "residence_certificate"],
+            "infrastructure": ["electricity_connection", "water_connection", "road_access"]
+        }
+    }
+
+@app.get("/locations")
+async def get_locations():
+    """Get Nepal administrative division data"""
+    try:
+        location_file = os.path.join(BASE_DIR, "locations.json")
+        if os.path.exists(location_file):
+            with open(location_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return {"error": "Locations file not found"}
+    except Exception as e:
+        logger.error(f"Error serving locations: {e}")
+        raise HTTPException(status_code=500, detail="Error loading location data")
+
+@app.get("/template/{document_type}")
+async def get_template(document_type: str):
+    """Get pattern definition for a specific document type"""
+    if document_type not in templates:
+        raise HTTPException(status_code=404, detail="Template not found")
+    return templates[document_type]
+
+
 if __name__ == "__main__":
     import socket
     import sys
