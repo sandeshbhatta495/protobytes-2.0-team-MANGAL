@@ -1,0 +1,82 @@
+{
+    "name": "सम्बन्धविच्छेदको निवेदन",
+    "category": "civil_registration",
+    "required_fields": [
+        "husband_name",
+        "wife_name",
+        "court_name",
+        "decision_date",
+        "decision_number",
+        "province",
+        "district",
+        "municipality",
+        "ward",
+        "applicant_name"
+    ],
+    "form_fields": [
+        {
+            "id": "husband_name",
+            "label": "श्रीमानको नाम",
+            "type": "text",
+            "required": true
+        },
+        {
+            "id": "wife_name",
+            "label": "श्रीमतीको नाम",
+            "type": "text",
+            "required": true
+        },
+        {
+            "id": "court_name",
+            "label": "फैसला गर्ने अदालत",
+            "type": "text",
+            "required": true
+        },
+        {
+            "id": "decision_date",
+            "label": "फैसला मिति",
+            "type": "date",
+            "required": true
+        },
+        {
+            "id": "decision_number",
+            "label": "फैसला नं.",
+            "type": "text",
+            "required": true
+        },
+        {
+            "id": "province",
+            "label": "प्रदेश",
+            "type": "select",
+            "required": true
+        },
+        {
+            "id": "district",
+            "label": "जिल्ला",
+            "type": "select",
+            "required": true
+        },
+        {
+            "id": "municipality",
+            "label": "नगरपालिका/गाउँपालिका",
+            "type": "select",
+            "required": true
+        },
+        {
+            "id": "ward",
+            "label": "वडा नं.",
+            "type": "number",
+            "required": true
+        },
+        {
+            "id": "applicant_name",
+            "label": "निवेदकको नाम",
+            "type": "text",
+            "required": true
+        }
+    ],
+    "content": "माननीय वडा अध्यक्षज्यू,\n\nवडा नं. {ward}\n{municipality}\n{district}\n{province}\n\nविषय: सम्बन्धविच्छेद दर्ता गरिपाउँ।\n\nमहोदय,\n\nश्री {husband_name} र श्रीमती {wife_name} बीच मिति {decision_date} मा श्री {court_name} को फैसला (नं. {decision_number}) अनुसार सम्बन्धविच्छेद भएकोले सोको लगत कट्टा/दर्ता गरि पाउन यो निवेदन पेश गरेको छु।\n\nनिवेदक,\n{applicant_name}\nमिति: {date_bs}",
+    "instructions": [
+        "अदालतको फैसलाको प्रतिलिपि अनिवार्य संलग्न गर्नुपर्नेछ"
+    ]
+}
