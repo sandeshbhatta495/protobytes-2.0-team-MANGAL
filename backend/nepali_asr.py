@@ -191,4 +191,26 @@ def get_nepali_asr():
     if nepali_asr_instance is None:
         nepali_asr_instance = NepaliASR()
     return nepali_asr_instance
+# CLI usage for testing
+if __name__ == '__main__':
+    if len(sys.argv) != 2:
+        print('Usage: python nepali_asr.py audio_file.mp3')
+        sys.exit(0)
+    
+    audio_path = sys.argv[1]
+    
+    if not os.path.exists(audio_path):
+        print(f"Audio file not found: {audio_path}")
+        sys.exit(1)
+    
+    asr = NepaliASR()
+    try:
+        transcription = asr.transcribe_audio_file(audio_path)
+        formatted_text = textwrap.fill(transcription, width=50)
+        print("Transcription:")
+        print(formatted_text)
+    except Exception as e:
+        print(f"Transcription failed: {e}")
+        sys.exit(1)
+
 
