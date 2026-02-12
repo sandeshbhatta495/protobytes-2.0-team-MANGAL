@@ -72,6 +72,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+class HandwritingRequest(BaseModel):
+    image: str  # Base64 encoded image data
+class GrammarCorrectionRequest(BaseModel):
+    text: str
+    context: str = ""  # optional field label / context
+
 # Global variables
 whisper_model = None
 templates = {}
@@ -676,6 +682,47 @@ async def recognize_handwriting(request: HandwritingRequest):
     except Exception as e:
         logger.error(f"Handwriting recognition error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Recognition failed: {str(e)}")
+
+@app.post("/generate-document")
+async def generate_document(request: DocumentRequest):
+    if request.document_type not in templates:
+        raise HTTPException(status_code=400, detail="Document template not found")
+    
+    template = templates[request.document_type]
+    
+    # Don't block on missing optional fields - just warn
+    missing_fields = []
+    for field in template.get("required_fields", []):
+        if field not in request.user_data or not str(request.user_data.get(field, '')).strip():
+            missing_fields.append(field)
+    
+    if missing_fields:
+        logger.warning(f"Missing fields for {request.document_type}: {missing_fields}")
+        # Only block if more than half are missing
+        if len(missing_fields) > len(template.get('required_fields', [])) / 2:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"धेरै आवश्यक फिल्डहरू छुटेकाछन्: {', '.join(missing_fields)}"
+            )
+    
+    try:
+        # Generate document content using template
+        document_content = fill_template(template, request.user_data)
+        
+        # Generate PDF
+        pdf_path = await generate_pdf(document_content, request.document_type, request.user_data)
+        
+        return {
+            "document_id": f"{request.document_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            "pdf_path": pdf_path,
+            "content": document_content
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Document generation failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"दस्तावेज उत्पन्न गर्न सकेन: {str(e)}")
 
 
 # Basic logit to convert date
