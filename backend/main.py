@@ -1,6 +1,27 @@
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, RedirectResponse
+import uvicorn
 import os
 from dotenv import load_dotenv
 import json
+
+# Configure FFmpeg path from imageio_ffmpeg before importing audio libraries
+try:
+    import imageio_ffmpeg
+    import shutil
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    ffmpeg_dir = os.path.dirname(ffmpeg_exe)
+    # Create a copy named ffmpeg.exe if it doesn't exist (libraries look for 'ffmpeg')
+    ffmpeg_standard = os.path.join(ffmpeg_dir, "ffmpeg.exe")
+    if not os.path.exists(ffmpeg_standard) and os.path.exists(ffmpeg_exe):
+        shutil.copy2(ffmpeg_exe, ffmpeg_standard)
+    os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+    # Also set FFMPEG_BINARY for pydub
+    os.environ["FFMPEG_BINARY"] = ffmpeg_standard if os.path.exists(ffmpeg_standard) else ffmpeg_exe
+except ImportError:
+    pass  # FFmpeg should be in system PATH
 
 # Load environment variables from .env file
 # Load environment variables from .env.config file (since .env is used as venv dir)
@@ -24,8 +45,16 @@ from datetime import datetime
 import google.generativeai as genai
 from pydantic import BaseModel
 import asyncio
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.lib.units import inch
 import textwrap
 import logging
+
+# Import our custom Nepali ASR module
+from nepali_asr import get_nepali_asr
 
 
 # Configure logging
