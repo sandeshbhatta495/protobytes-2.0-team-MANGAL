@@ -562,3 +562,54 @@ async def correct_grammar_endpoint(request: GrammarCorrectionRequest, req: Reque
     corrected = await correct_nepali_grammar(request.text, request.context)
     return {"original": request.text, "corrected": corrected}
 
+# To-do
+@app.post("/recognize-handwriting")
+async def recognize_handwriting(request: HandwritingRequest):
+    pass
+
+
+# Basic logit to convert date
+def convert_to_bikram_sambat(date_gregorian: str) -> str:
+    """Convert Gregorian date to Bikram Sambat (approximate)"""
+    try:
+        dt = datetime.strptime(date_gregorian, "%Y-%m-%d")
+        # Approximate BS = AD + 56 years 8 months
+        bs_year = dt.year + 56
+        bs_month = dt.month + 8
+        bs_day = dt.day + 16
+        if bs_day > 30:
+            bs_day -= 30
+            bs_month += 1
+        if bs_month > 12:
+            bs_month -= 12
+            bs_year += 1
+        return f"{bs_year}-{bs_month:02d}-{bs_day:02d}"
+    except:
+        return date_gregorian
+
+if __name__ == "__main__":
+    import socket
+    import sys
+    
+    # Find available port starting from 8000
+    def find_available_port(start_port=8000):
+        for port in range(start_port, start_port + 10):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.bind(('localhost', port))
+                    s.close()
+                    return port
+            except OSError:
+                continue
+        return None
+    
+    available_port = find_available_port()
+    if available_port:
+        print(f"Starting server on port {available_port}")
+        print(f"API docs at: http://localhost:{available_port}/docs")
+        uvicorn.run(app, host="0.0.0.0", port=available_port)
+    else:
+        print("❌ No available ports found in range 8000-8010")
+        print("Please close some applications and try again")
+        sys.exit(1)
+
