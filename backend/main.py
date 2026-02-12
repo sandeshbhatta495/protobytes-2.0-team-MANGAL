@@ -507,4 +507,58 @@ async def correct_nepali_grammar(text: str, context: str = "") -> str:
         logger.warning(f"Grammar correction failed, returning original: {e}")
         return text
 
+#adding rate limiting logic
+
+_grammar_rate_limit_store: Dict[str, list] = {}
+GRAMMAR_RATE_LIMIT_MAX_REQUESTS = 10  # Max requests per window
+GRAMMAR_RATE_LIMIT_WINDOW_SECONDS = 60  # Time window in seconds
+MAX_GRAMMAR_TEXT_LENGTH = 5000  # Maximum text length for grammar correction
+
+
+def check_rate_limit(client_ip: str) -> bool:
+    """Check if client is within rate limit. Returns True if allowed, False if limited."""
+    now = datetime.now().timestamp()
+    window_start = now - GRAMMAR_RATE_LIMIT_WINDOW_SECONDS
+    
+    if client_ip not in _grammar_rate_limit_store:
+        _grammar_rate_limit_store[client_ip] = []
+    
+    # Clean old entries
+    _grammar_rate_limit_store[client_ip] = [
+        ts for ts in _grammar_rate_limit_store[client_ip] if ts > window_start
+    ]
+    
+    # Check limit
+    if len(_grammar_rate_limit_store[client_ip]) >= GRAMMAR_RATE_LIMIT_MAX_REQUESTS:
+        return False
+    
+    # Record this request
+    _grammar_rate_limit_store[client_ip].append(now)
+    return True
+
+
+# RMmaking correct-grammer end point avialiable
+
+@app.post("/correct-grammar")
+async def correct_grammar_endpoint(request: GrammarCorrectionRequest, req: Request):
+    """Correct Nepali grammar in the given text using Gemini AI"""
+    # Get client IP for rate limiting
+    client_ip = req.client.host if req.client else "unknown"
+    
+    # Check rate limit
+    if not check_rate_limit(client_ip):
+        raise HTTPException(
+            status_code=429, 
+            detail="Too many requests. Please wait before trying again."
+        )
+    
+    # Validate text length
+    if len(request.text) > MAX_GRAMMAR_TEXT_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Text too long. Maximum {MAX_GRAMMAR_TEXT_LENGTH} characters allowed."
+        )
+    
+    corrected = await correct_nepali_grammar(request.text, request.context)
+    return {"original": request.text, "corrected": corrected}
 
