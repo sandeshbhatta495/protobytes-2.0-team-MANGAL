@@ -592,9 +592,90 @@ async def correct_grammar_endpoint(request: GrammarCorrectionRequest, req: Reque
     return {"original": request.text, "corrected": corrected}
 
 # To-do
+# currently use gemini later offline model
 @app.post("/recognize-handwriting")
 async def recognize_handwriting(request: HandwritingRequest):
-    pass
+    """Recognize handwritten text from canvas image using Gemini Vision"""
+    try:
+        if not gemini_model:
+            raise HTTPException(status_code=503, detail="AI model not available. Please set GEMINI_API_KEY in .env.config")
+        
+        # Extract base64 image data (remove data:image/png;base64, prefix if present)
+        image_data = request.image
+        if ',' in image_data:
+            image_data = image_data.split(',')[1]
+        
+        import base64
+        from PIL import Image
+        import io
+        
+        # Decode base64 to image
+        image_bytes = base64.b64decode(image_data)
+        image = Image.open(io.BytesIO(image_bytes))
+        
+        logger.info(f"Received image: mode={image.mode}, size={image.size}")
+        
+        # Verify image has actual content (not blank)
+        # Check for any pixel with significant alpha (drawn content)
+        has_content = False
+        img_array = list(image.getdata())
+        for pixel in img_array:
+            if len(pixel) == 4:  # RGBA
+                r, g, b, a = pixel
+                # Any pixel with alpha > 10 means something was drawn
+                if a > 10:
+                    has_content = True
+                    break
+            elif len(pixel) == 3:  # RGB
+                r, g, b = pixel
+                # For non-RGBA, check for non-white pixels
+                if r < 240 or g < 240 or b < 240:
+                    has_content = True
+                    break
+        
+        if not has_content:
+            logger.warning("Canvas appears empty - no drawn content detected")
+            return {"text": "", "success": False, "detail": "Canvas appears empty"}
+        
+        # Convert RGBA to RGB with white background for better recognition
+        if image.mode == 'RGBA':
+            # Create white background
+            background = Image.new('RGB', image.size, (255, 255, 255))
+            # Paste the image using alpha channel as mask
+            background.paste(image, mask=image.split()[3])
+            image = background
+            logger.info("Converted RGBA to RGB with white background")
+        
+        # Use Gemini Vision to recognize handwriting — focused Nepali prompt
+        prompt = """यो छविमा हातले लेखिएको नेपाली (देवनागरी लिपि) पाठ छ।
+कृपया छविमा देखिएको सबै पाठ ध्यानपूर्वक पढ्नुहोस् र लेख्नुहोस्।
+नियमहरू:
+1. केवल पढिएको पाठ मात्र फर्काउनुहोस्
+2. यदि देवनागरी लिपि हो भने नेपाली युनिकोडमा लेख्नुहोस्  
+3. यदि English अक्षर देखिन्छ भने English मा नै राख्नुहोस्
+4. कुनै व्याख्या वा थप टिप्पणी नलेख्नुहोस्
+5. शुद्ध नेपाली व्याकरणमा लेख्नुहोस्"""
+        
+        logger.info("Sending image to Gemini for recognition...")
+        response = await asyncio.to_thread(gemini_model.generate_content, [prompt, image])
+        recognized_text = response.text.strip()
+        
+        logger.info(f"Gemini raw response: {recognized_text[:200] if recognized_text else '(empty)'}")
+        
+        # Remove any markdown formatting Gemini might add
+        recognized_text = recognized_text.strip('`').strip('*').strip()
+        if recognized_text.startswith('```'):
+            recognized_text = recognized_text.split('\n', 1)[-1].rsplit('```', 1)[0].strip()
+        
+        logger.info(f"Handwriting recognition result: {recognized_text[:100] if recognized_text else '(empty)'}")
+        
+        return {"text": recognized_text, "success": True}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Handwriting recognition error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Recognition failed: {str(e)}")
 
 
 # Basic logit to convert date
