@@ -1,10 +1,15 @@
 .python-version
 protob3119
 
-# Environment and API keys
+# Environment and API keys (actual secrets)
 .env/
 .env
-*.env
+.env.config
+*.env.local
+
+# Allow example/template env files
+!.env.example
+!.env.config.example
 
 # Python cache
 __pycache__/
