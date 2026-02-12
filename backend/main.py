@@ -478,3 +478,33 @@ def offline_transliterate(text: str) -> str:
     
     return ''.join(result)
 
+# adding the correct_nepali_grammer uses gemini
+async def correct_nepali_grammar(text: str, context: str = "") -> str:
+    """Post-process Nepali text for grammar correction using Gemini."""
+    if not gemini_model or not text or not text.strip():
+        return text
+    try:
+        ctx_hint = f" (यो फिल्ड: {context})" if context else ""
+        prompt = (
+            "तपाईंलाई नेपाली पाठ दिइएको छ। कृपया यसलाई शुद्ध नेपाली व्याकरणमा सच्याउनुहोस्।\n"
+            "- मात्रा, हलन्त, र विसर्ग ठीक गर्नुहोस्\n"
+            "- शब्द क्रम र विभक्ति मिलाउनुहोस्\n"
+            "- अर्थ नबिगार्नुहोस्, केवल व्याकरण सच्याउनुहोस्\n"
+            "- केवल सच्याइएको नेपाली पाठ मात्र फर्काउनुहोस्, अरू केही नलेख्नुहोस्\n"
+            f"{ctx_hint}\n\n"
+            f"पाठ: {text}\n\n"
+            "शुद्ध पाठ:"
+        )
+        # Run synchronous Gemini call in threadpool to avoid blocking the event loop
+        response = await asyncio.to_thread(gemini_model.generate_content, prompt)
+        corrected = response.text.strip()
+        # Sanity check: if Gemini returned something wildly different or empty, keep original
+        if not corrected or len(corrected) > len(text) * 3:
+            return text
+        logger.info(f"Grammar correction: '{text[:40]}' -> '{corrected[:40]}'")
+        return corrected
+    except Exception as e:
+        logger.warning(f"Grammar correction failed, returning original: {e}")
+        return text
+
+
