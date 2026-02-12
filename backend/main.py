@@ -1,11 +1,17 @@
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, RedirectResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as StarletteRequest
 import uvicorn
 import os
 from dotenv import load_dotenv
 import json
+import secrets
+from collections import defaultdict
+import time
 
 # Configure FFmpeg path from imageio_ffmpeg before importing audio libraries
 try:
@@ -60,14 +66,59 @@ from nepali_asr import get_nepali_asr
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Sarkari-Sarathi API", version="1.0.0")
+app = FastAPI(
+    title="Sarkari-Sarathi API",
+    version="1.0.0",
+    docs_url="/docs" if os.getenv("ENVIRONMENT") != "production" else None,
+    redoc_url="/redoc" if os.getenv("ENVIRONMENT") != "production" else None,
+)
 
-# CORS middleware
+# Security Configuration
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:5500,http://localhost:3000").split(",")
+API_SECRET_KEY = os.getenv("API_SECRET_KEY", "")
+RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "100"))
+RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "60"))
+
+# Global rate limiter
+class RateLimiter:
+    def __init__(self):
+        self.requests = defaultdict(list)
+    
+    def is_allowed(self, client_ip: str, max_requests: int = RATE_LIMIT_REQUESTS, window: int = RATE_LIMIT_WINDOW) -> bool:
+        now = time.time()
+        window_start = now - window
+        
+        # Clean old requests
+        self.requests[client_ip] = [ts for ts in self.requests[client_ip] if ts > window_start]
+        
+        # Check limit
+        if len(self.requests[client_ip]) >= max_requests:
+            return False
+        
+        self.requests[client_ip].append(now)
+        return True
+
+rate_limiter = RateLimiter()
+
+# Security Headers Middleware
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: StarletteRequest, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline' cdn.jsdelivr.net cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' cdn.jsdelivr.net cdnjs.cloudflare.com fonts.googleapis.com; font-src 'self' fonts.gstatic.com"
+        return response
+
+app.add_middleware(SecurityHeadersMiddleware)
+
+# CORS middleware with restricted origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -75,6 +126,33 @@ app.add_middleware(
 if os.path.exists(FRONTEND_DIR):
     app.mount("/app", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
     logger.info(f"Frontend mounted at /app from {FRONTEND_DIR}")
+
+# API Key Authentication Dependency
+async def verify_api_key(x_api_key: Optional[str] = Header(None)):
+    """Verify API key if API_SECRET_KEY is configured"""
+    if API_SECRET_KEY and API_SECRET_KEY.strip():
+        if not x_api_key:
+            raise HTTPException(
+                status_code=401,
+                detail="API key required. Include X-API-Key header."
+            )
+        if not secrets.compare_digest(x_api_key, API_SECRET_KEY):
+            raise HTTPException(
+                status_code=403,
+                detail="Invalid API key"
+            )
+    return True
+
+# Rate Limiting Dependency
+async def check_rate_limit_dependency(request: Request):
+    """Check global rate limit for the request"""
+    client_ip = request.client.host if request.client else "unknown"
+    if not rate_limiter.is_allowed(client_ip):
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded. Maximum {RATE_LIMIT_REQUESTS} requests per {RATE_LIMIT_WINDOW} seconds."
+        )
+    return True
 
 # Global variables
 whisper_model = None
@@ -171,7 +249,11 @@ async def health_check():
     }
 
 @app.post("/transcribe-audio")
-async def transcribe_audio(audio: UploadFile = File(...)):
+async def transcribe_audio(
+    audio: UploadFile = File(...),
+    _rate_limit: bool = Depends(check_rate_limit_dependency),
+    _api_key: bool = Depends(verify_api_key)
+):
     """
     Transcribe audio using Nepali ASR model (with Whisper fallback)
     """
@@ -342,7 +424,10 @@ async def get_asr_status():
     return status
 
 @app.post("/transliterate")
-async def transliterate_text(request: TransliterationRequest):
+async def transliterate_text(
+    request: TransliterationRequest,
+    _rate_limit: bool = Depends(check_rate_limit_dependency)
+):
     """Translate/Transliterate text using Gemini AI with offline fallback"""
     try:
         if gemini_model and request.text.strip():
@@ -578,7 +663,12 @@ def check_rate_limit(client_ip: str) -> bool:
 
 
 @app.post("/correct-grammar")
-async def correct_grammar_endpoint(request: GrammarCorrectionRequest, req: Request):
+async def correct_grammar_endpoint(
+    request: GrammarCorrectionRequest,
+    req: Request,
+    _rate_limit: bool = Depends(check_rate_limit_dependency),
+    _api_key: bool = Depends(verify_api_key)
+):
     """Correct Nepali grammar in the given text using Gemini AI"""
     # Get client IP for rate limiting
     client_ip = req.client.host if req.client else "unknown"
@@ -689,7 +779,11 @@ async def recognize_handwriting(request: HandwritingRequest):
         raise HTTPException(status_code=500, detail=f"Recognition failed: {str(e)}")
 
 @app.post("/generate-document")
-async def generate_document(request: DocumentRequest):
+async def generate_document(
+    request: DocumentRequest,
+    _rate_limit: bool = Depends(check_rate_limit_dependency),
+    _api_key: bool = Depends(verify_api_key)
+):
     if request.document_type not in templates:
         raise HTTPException(status_code=400, detail="Document template not found")
     
