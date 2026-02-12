@@ -171,5 +171,96 @@ function clientTransliterate(text) {
     }
     return result.join('');
 }
+// =====================================================
+//  NEPALI TEXT VALIDATION
+// =====================================================
+function isDevanagariChar(ch) {
+    const c = ch.charCodeAt(0);
+    return (c >= 0x0900 && c <= 0x097F);
+}
 
+function isNepaliText(text) {
+    if (!text || !text.trim()) return true;
+    const cleaned = text.replace(/[\s\d.,;:!?()\-\/'"।०-९]+/g, '');
+    if (!cleaned) return true;
+    let nepaliCount = 0;
+    for (const ch of cleaned) { if (isDevanagariChar(ch)) nepaliCount++; }
+    return (nepaliCount / cleaned.length) >= 0.5;
+}
+
+function validateAllFieldsNepali() {
+    const issues = [];
+    const form = document.getElementById('documentForm');
+    if (!form) return issues;
+    form.querySelectorAll('input[type="text"], textarea').forEach(input => {
+        const id = input.id || '';
+        const name = input.name || '';
+        // Skip fields that are explicitly marked as English variants (e.g., child_name_en)
+        if (id.endsWith('_en') || name.endsWith('_en')) {
+            return;
+        }
+        const val = input.value.trim();
+        if (val && !isNepaliText(val)) {
+            const state = fieldStates[id];
+            issues.push({ fieldId: id, label: state ? state.label : id, value: val });
+        }
+    });
+    return issues;
+}
+
+// =====================================================
+//  TOAST NOTIFICATIONS (replaces alert)
+// =====================================================
+function showToast(message, type, duration) {
+    type = type || 'info';
+    duration = duration || 4000;
+    let container = document.getElementById('toastContainer');
+    if (!container) {
+        container = document.createElement('div');
+        container.id = 'toastContainer';
+        container.className = 'toast-container';
+        document.body.appendChild(container);
+    }
+    const toast = document.createElement('div');
+    toast.className = 'toast toast-' + type;
+    toast.textContent = message;
+    container.appendChild(toast);
+    setTimeout(function () {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateX(100%)';
+        toast.style.transition = 'all 0.3s ease';
+        setTimeout(function () { toast.remove(); }, 300);
+    }, duration);
+}
+
+function showError(message) { showToast(message, 'error', 5000); }
+function showSuccess(message) { showToast(message, 'success', 3000); }
+
+// =====================================================
+//  APP INITIALIZATION
+// =====================================================
+document.addEventListener('DOMContentLoaded', function () {
+    try {
+        loadInitialData();
+        setupEventListeners();
+        setupModalCanvas();
+    } catch (err) {
+        console.error('App init error:', err);
+    }
+});
+
+function setupEventListeners() {
+    var form = document.getElementById('documentForm');
+    if (form) form.addEventListener('submit', handleFormSubmit);
+}
+
+async function loadDocumentTypes() {
+    try {
+        const response = await fetch(API_BASE + '/document-types');
+        const data = await response.json();
+        console.log('Available document types:', data);
+    } catch (error) {
+        console.error('Error loading document types:', error);
+    }
+}
 
