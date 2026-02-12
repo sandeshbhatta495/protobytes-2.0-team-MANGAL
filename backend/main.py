@@ -170,6 +170,13 @@ class TransliterationRequest(BaseModel):
     from_lang: str = "en"
     to_lang: str = "ne"
 
+class GrammarCorrectionRequest(BaseModel):
+    text: str
+    context: Optional[str] = None
+
+class HandwritingRequest(BaseModel):
+    image_data: str  # Base64 encoded image
+
 async def initialize_models():
     global whisper_model, gemini_model, nepali_asr
     
