@@ -638,6 +638,8 @@ def _ensure_nepali_font():
     _nepali_font_registered = True
     return _nepali_font_name
 
+## Needs fixing 
+## Like a lot
 async def generate_pdf(content: str, document_type: str, user_data: Dict) -> str:
     """Generate PDF document with proper Nepali layout"""
     output_dir = os.path.join(BASE_DIR, "generated_documents")
