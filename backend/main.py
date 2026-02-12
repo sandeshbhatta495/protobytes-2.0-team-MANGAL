@@ -56,7 +56,6 @@ import logging
 # Import our custom Nepali ASR module
 from nepali_asr import get_nepali_asr
 
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -72,11 +71,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class HandwritingRequest(BaseModel):
-    image: str  # Base64 encoded image data
-class GrammarCorrectionRequest(BaseModel):
-    text: str
-    context: str = ""  # optional field label / context
+# Serve entire frontend folder at /app so index.html and script.js load reliably
+if os.path.exists(FRONTEND_DIR):
+    app.mount("/app", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+    logger.info(f"Frontend mounted at /app from {FRONTEND_DIR}")
 
 # Global variables
 whisper_model = None
@@ -176,7 +174,6 @@ async def health_check():
 async def transcribe_audio(audio: UploadFile = File(...)):
     """
     Transcribe audio using Nepali ASR model (with Whisper fallback)
-    again falls back to gemini if both of them fail
     """
     import subprocess
     
@@ -310,6 +307,7 @@ async def transcribe_audio(audio: UploadFile = File(...)):
             "model_used": model_used,
             "grammar_corrected": corrected_transcription != transcription
         }
+    
     except HTTPException:
         # Re-raise HTTP exceptions
         raise
@@ -513,7 +511,14 @@ def offline_transliterate(text: str) -> str:
     
     return ''.join(result)
 
-# adding the correct_nepali_grammer uses gemini
+class HandwritingRequest(BaseModel):
+    image: str  # Base64 encoded image data
+
+class GrammarCorrectionRequest(BaseModel):
+    text: str
+    context: str = ""  # optional field label / context
+
+
 async def correct_nepali_grammar(text: str, context: str = "") -> str:
     """Post-process Nepali text for grammar correction using Gemini."""
     if not gemini_model or not text or not text.strip():
@@ -542,8 +547,8 @@ async def correct_nepali_grammar(text: str, context: str = "") -> str:
         logger.warning(f"Grammar correction failed, returning original: {e}")
         return text
 
-#adding rate limiting logic
 
+# Simple in-memory rate limiter for grammar correction endpoint
 _grammar_rate_limit_store: Dict[str, list] = {}
 GRAMMAR_RATE_LIMIT_MAX_REQUESTS = 10  # Max requests per window
 GRAMMAR_RATE_LIMIT_WINDOW_SECONDS = 60  # Time window in seconds
@@ -572,8 +577,6 @@ def check_rate_limit(client_ip: str) -> bool:
     return True
 
 
-# RMmaking correct-grammer end point avialiable
-
 @app.post("/correct-grammar")
 async def correct_grammar_endpoint(request: GrammarCorrectionRequest, req: Request):
     """Correct Nepali grammar in the given text using Gemini AI"""
@@ -597,8 +600,10 @@ async def correct_grammar_endpoint(request: GrammarCorrectionRequest, req: Reque
     corrected = await correct_nepali_grammar(request.text, request.context)
     return {"original": request.text, "corrected": corrected}
 
-# To-do
-# currently use gemini later offline model
+
+# currently gemini
+# Local model to be made
+# Needs lots of fixing
 @app.post("/recognize-handwriting")
 async def recognize_handwriting(request: HandwritingRequest):
     """Recognize handwritten text from canvas image using Gemini Vision"""
@@ -724,8 +729,33 @@ async def generate_document(request: DocumentRequest):
         logger.error(f"Document generation failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"दस्तावेज उत्पन्न गर्न सकेन: {str(e)}")
 
+def fill_template(template: Dict, user_data: Dict) -> str:
+    """Fill template with user data"""
+    content = template.get("content", "")
+    if not content:
+        # Build a basic content from user data
+        lines = []
+        for key, value in user_data.items():
+            if value:
+                lines.append(f"{key}: {value}")
+        return "\n".join(lines)
+    
+    # Replace placeholders with actual data
+    for key, value in user_data.items():
+        placeholder = f"{{{key}}}"
+        content = content.replace(placeholder, str(value) if value else '')
+    
+    # Add current date
+    current_date = datetime.now().strftime("%Y-%m-%d")
+    content = content.replace("{date}", current_date)
+    content = content.replace("{date_bs}", convert_to_bikram_sambat(current_date))
+    
+    # Remove any remaining unresolved placeholders like {something}
+    import re
+    content = re.sub(r'\{[a-zA-Z_]+\}', '..........', content)
+    
+    return content
 
-# Basic logit to convert date
 def convert_to_bikram_sambat(date_gregorian: str) -> str:
     """Convert Gregorian date to Bikram Sambat (approximate)"""
     try:
@@ -743,7 +773,6 @@ def convert_to_bikram_sambat(date_gregorian: str) -> str:
         return f"{bs_year}-{bs_month:02d}-{bs_day:02d}"
     except:
         return date_gregorian
-
 
 # Register Nepali font once at module level
 _nepali_font_registered = False
@@ -766,8 +795,6 @@ def _ensure_nepali_font():
     _nepali_font_registered = True
     return _nepali_font_name
 
-## Needs fixing 
-## Like a lot
 async def generate_pdf(content: str, document_type: str, user_data: Dict) -> str:
     """Generate PDF document with proper Nepali layout"""
     output_dir = os.path.join(BASE_DIR, "generated_documents")
@@ -781,7 +808,6 @@ async def generate_pdf(content: str, document_type: str, user_data: Dict) -> str
     width, height = A4
     font_name = _ensure_nepali_font()
     
-    # --- PAGE HEADER ---
     # Nepal Government Header
     c.setFont(font_name, 14)
     c.drawCentredString(width / 2, height - 0.7 * inch, "नेपाल सरकार")
@@ -814,12 +840,12 @@ async def generate_pdf(content: str, document_type: str, user_data: Dict) -> str
     subject = f"विषय: {get_document_subject(document_type)}"
     c.drawString(inch, height - 1.9 * inch, subject)
     
-    # Date on the right
+    # Date on the right TOTTTTTTTT
     date_bs = convert_to_bikram_sambat(datetime.now().strftime('%Y-%m-%d'))
     c.setFont(font_name, 10)
     c.drawRightString(width - inch, height - 1.9 * inch, f"मिति: {date_bs}")
-    
-    # --- BODY CONTENT ---
+
+    # Body contenttt
     c.setFont(font_name, 11)
     y_position = height - 2.3 * inch
     
@@ -839,8 +865,7 @@ async def generate_pdf(content: str, document_type: str, user_data: Dict) -> str
         else:
             y_position -= 0.12 * inch
     
-    # --- FOOTER / SIGNATURES ---
-    # Make sure signature section is at bottom
+    # Signature at bottom
     if y_position < 3.5 * inch:
         c.showPage()
         c.setFont(font_name, 11)
@@ -849,11 +874,11 @@ async def generate_pdf(content: str, document_type: str, user_data: Dict) -> str
     sig_y = 2.2 * inch
     c.setFont(font_name, 10)
     
-    # Left: applicant
+    # Left applicant
     c.drawString(inch, sig_y + 0.3 * inch, "..............................")
     c.drawString(inch, sig_y, "निवेदकको हस्ताक्षर")
     
-    # Right: authority  
+    # Right authority  
     c.drawString(width - 3 * inch, sig_y + 0.3 * inch, "..............................")
     c.drawString(width - 3 * inch, sig_y, "प्रमाणिकरण अधिकारी")
     
@@ -879,6 +904,14 @@ def get_document_subject(document_type: str) -> str:
     }
     return subjects.get(document_type, "निवेदन")
 
+@app.get("/download-document/{filename}")
+async def download_document(filename: str):
+    """Download generated document"""
+    file_path = os.path.join(BASE_DIR, "generated_documents", filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    return FileResponse(file_path, media_type='application/pdf', filename=filename)
 
 @app.get("/templates")
 async def list_templates():
@@ -918,7 +951,6 @@ async def get_template(document_type: str):
         raise HTTPException(status_code=404, detail="Template not found")
     return templates[document_type]
 
-
 if __name__ == "__main__":
     import socket
     import sys
@@ -944,4 +976,3 @@ if __name__ == "__main__":
         print("❌ No available ports found in range 8000-8010")
         print("Please close some applications and try again")
         sys.exit(1)
-
