@@ -1,54 +1,19 @@
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request, Header, Depends
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, RedirectResponse
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request as StarletteRequest
 import uvicorn
 import os
 from dotenv import load_dotenv
 import json
-import secrets
-from collections import defaultdict
-import time
-
-# Configure FFmpeg path from imageio_ffmpeg before importing audio libraries
-try:
-    import imageio_ffmpeg
-    import shutil
-    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-    ffmpeg_dir = os.path.dirname(ffmpeg_exe)
-    # Create a copy named ffmpeg.exe if it doesn't exist (libraries look for 'ffmpeg')
-    ffmpeg_standard = os.path.join(ffmpeg_dir, "ffmpeg.exe")
-    if not os.path.exists(ffmpeg_standard) and os.path.exists(ffmpeg_exe):
-        shutil.copy2(ffmpeg_exe, ffmpeg_standard)
-    os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
-    # Also set FFMPEG_BINARY for pydub
-    os.environ["FFMPEG_BINARY"] = ffmpeg_standard if os.path.exists(ffmpeg_standard) else ffmpeg_exe
-except ImportError:
-    pass  # FFmpeg should be in system PATH
-
-# Load environment variables from .env file
-# Load environment variables from .env.config file (since .env is used as venv dir)
-# Get the directory where this script is located
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-FRONTEND_DIR = os.path.join(BASE_DIR, "..", "frontend")
-config_path = os.path.join(BASE_DIR, ".env.config")
-load_dotenv(dotenv_path=config_path)
-
-if not os.getenv("GEMINI_API_KEY"):
-    import logging as _log
-    _log.warning("GEMINI_API_KEY not found in .env.config, trying default load_dotenv")
-    # Fallback to default check (might load from system env)
-    load_dotenv()
+import subprocess
+import shutil
 import tempfile
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import aiofiles
 import whisper
 import torch
 from datetime import datetime
-import google.generativeai as genai
 from pydantic import BaseModel
 import asyncio
 from reportlab.pdfgen import canvas
@@ -58,108 +23,90 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.units import inch
 import textwrap
 import logging
+from PIL import Image
+import io
+import base64
 
-# Import our custom Nepali ASR module
+# Configure FFmpeg path - MUST be before any audio library imports
+def setup_ffmpeg_path():
+    """Setup FFmpeg in PATH for audio processing"""
+    try:
+        import imageio_ffmpeg
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        ffmpeg_dir = os.path.dirname(ffmpeg_exe)
+        ffmpeg_standard = os.path.join(ffmpeg_dir, "ffmpeg.exe")
+        
+        # Create standard ffmpeg.exe if needed
+        if not os.path.exists(ffmpeg_standard):
+            shutil.copy2(ffmpeg_exe, ffmpeg_standard)
+            print(f"[FFmpeg] Created: {ffmpeg_standard}")
+        
+        # Prepend to PATH
+        current_path = os.environ.get("PATH", "")
+        if ffmpeg_dir not in current_path:
+            os.environ["PATH"] = ffmpeg_dir + os.pathsep + current_path
+        
+        os.environ["FFMPEG_BINARY"] = ffmpeg_standard
+        return ffmpeg_standard
+    except Exception as e:
+        print(f"[FFmpeg] Setup failed: {e}")
+        return None
+
+FFMPEG_PATH = setup_ffmpeg_path()
+
+# Load env variables
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+FRONTEND_DIR = os.path.join(BASE_DIR, "..", "frontend")
+load_dotenv(os.path.join(BASE_DIR, ".env.config"))
+load_dotenv()
+
+# Import custom modules
 from nepali_asr import get_nepali_asr
+from grammar import correct_nepali_text
 
-# Configure logging
+# Import CNN handwriting recognizer
+import sys
+_CNN_MODEL_DIR = os.path.join(BASE_DIR, "..", "handwriting_recognition", "cnn_model")
+if os.path.isdir(_CNN_MODEL_DIR):
+    sys.path.insert(0, _CNN_MODEL_DIR)
+    try:
+        from inference import get_recognizer as get_cnn_recognizer, recognize_handwriting_image
+        _CNN_AVAILABLE = True
+    except ImportError as e:
+        print(f"[Warning] CNN handwriting recognizer import failed: {e}")
+        _CNN_AVAILABLE = False
+else:
+    _CNN_AVAILABLE = False
+
+# Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(
-    title="Sarkari-Sarathi API",
-    version="1.0.0",
-    docs_url="/docs" if os.getenv("ENVIRONMENT") != "production" else None,
-    redoc_url="/redoc" if os.getenv("ENVIRONMENT") != "production" else None,
-)
+app = FastAPI(title="Sarkari-Sarathi API", version="1.0.0")
 
-# Security Configuration
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:5500,http://localhost:3000").split(",")
-API_SECRET_KEY = os.getenv("API_SECRET_KEY", "")
-RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "100"))
-RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "60"))
-
-# Global rate limiter
-class RateLimiter:
-    def __init__(self):
-        self.requests = defaultdict(list)
-    
-    def is_allowed(self, client_ip: str, max_requests: int = RATE_LIMIT_REQUESTS, window: int = RATE_LIMIT_WINDOW) -> bool:
-        now = time.time()
-        window_start = now - window
-        
-        # Clean old requests
-        self.requests[client_ip] = [ts for ts in self.requests[client_ip] if ts > window_start]
-        
-        # Check limit
-        if len(self.requests[client_ip]) >= max_requests:
-            return False
-        
-        self.requests[client_ip].append(now)
-        return True
-
-rate_limiter = RateLimiter()
-
-# Security Headers Middleware
-class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: StarletteRequest, call_next):
-        response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-XSS-Protection"] = "1; mode=block"
-        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline' cdn.jsdelivr.net cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' cdn.jsdelivr.net cdnjs.cloudflare.com fonts.googleapis.com; font-src 'self' fonts.gstatic.com"
-        return response
-
-app.add_middleware(SecurityHeadersMiddleware)
-
-# CORS middleware with restricted origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Serve entire frontend folder at /app so index.html and script.js load reliably
+# Static files
+static_dir = os.path.join(BASE_DIR, "static")
+os.makedirs(static_dir, exist_ok=True)
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
 if os.path.exists(FRONTEND_DIR):
     app.mount("/app", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
-    logger.info(f"Frontend mounted at /app from {FRONTEND_DIR}")
 
-# API Key Authentication Dependency
-async def verify_api_key(x_api_key: Optional[str] = Header(None)):
-    """Verify API key if API_SECRET_KEY is configured"""
-    if API_SECRET_KEY and API_SECRET_KEY.strip():
-        if not x_api_key:
-            raise HTTPException(
-                status_code=401,
-                detail="API key required. Include X-API-Key header."
-            )
-        if not secrets.compare_digest(x_api_key, API_SECRET_KEY):
-            raise HTTPException(
-                status_code=403,
-                detail="Invalid API key"
-            )
-    return True
-
-# Rate Limiting Dependency
-async def check_rate_limit_dependency(request: Request):
-    """Check global rate limit for the request"""
-    client_ip = request.client.host if request.client else "unknown"
-    if not rate_limiter.is_allowed(client_ip):
-        raise HTTPException(
-            status_code=429,
-            detail=f"Rate limit exceeded. Maximum {RATE_LIMIT_REQUESTS} requests per {RATE_LIMIT_WINDOW} seconds."
-        )
-    return True
-
-# Global variables
+# Global state
 whisper_model = None
 templates = {}
-gemini_model = None
-nepali_asr = None  # Our custom Nepali ASR instance
+nepali_asr = None
+cnn_recognizer = None  # CNN handwriting recognizer
 
+# Pydantic Models
 class DocumentRequest(BaseModel):
     document_type: str
     user_data: Dict[str, Any]
@@ -170,378 +117,247 @@ class TransliterationRequest(BaseModel):
     from_lang: str = "en"
     to_lang: str = "ne"
 
+class HandwritingRequest(BaseModel):
+    image: str
+
 class GrammarCorrectionRequest(BaseModel):
     text: str
-    context: Optional[str] = None
+    context: str = ""
 
-class HandwritingRequest(BaseModel):
-    image_data: str  # Base64 encoded image
-
+# Initialization
 async def initialize_models():
-    global whisper_model, gemini_model, nepali_asr
-    
-    # Load templates first so they are always available even if models fail
+    global whisper_model, nepali_asr, cnn_recognizer
     await load_templates()
-    logger.info(f"Loaded {len(templates)} document templates")
     
-    # Load Whisper model (as fallback)
+    # Load CNN handwriting recognizer
+    if _CNN_AVAILABLE:
+        try:
+            cnn_recognizer = get_cnn_recognizer()
+            if cnn_recognizer.loaded:
+                logger.info("CNN handwriting recognizer loaded")
+            else:
+                logger.warning("CNN handwriting model not trained yet — run train.py")
+        except Exception as e:
+            logger.warning(f"CNN recognizer init failed: {e}")
+    
+    # Load Whisper (tiny model for CPU efficiency)
     try:
-        whisper_model = whisper.load_model("small")
-        logger.info("Generic Whisper model loaded as fallback")
+        whisper_model = whisper.load_model("tiny")
+        logger.info("Generic Whisper (tiny) loaded - CPU optimized")
     except Exception as e:
-        logger.warning(f"Failed to load generic Whisper model: {e}")
+        logger.warning(f"Whisper load failed: {e}")
     
-    # Initialize our custom Nepali ASR
+    # Load Nepali ASR
     try:
         nepali_asr = get_nepali_asr()
         if nepali_asr.load_model():
-            logger.info("Nepali ASR model loaded successfully")
+            logger.info("Nepali ASR loaded")
         else:
-            logger.warning("Failed to load Nepali ASR model, will use fallback")
+            logger.warning("Nepali ASR failed to load")
     except Exception as e:
-        logger.warning(f"Failed to initialize Nepali ASR: {e}")
-    
-    # Configure Gemini (you'll need to set GEMINI_API_KEY in environment)
-    api_key = os.getenv("GEMINI_API_KEY")
-    if api_key:
-        genai.configure(api_key=api_key)
-        gemini_model = genai.GenerativeModel('gemini-2.0-flash')
-        logger.info("Gemini model configured")
-    else:
-        logger.warning("GEMINI_API_KEY not found in environment")
+        logger.warning(f"Nepali ASR init failed: {e}")
 
 async def load_templates():
     global templates
     template_dir = os.path.join(BASE_DIR, "templates")
-    if not os.path.exists(template_dir):
-        logger.warning(f"Template directory not found: {template_dir}")
-        return
-    for filename in os.listdir(template_dir):
-        if filename.endswith('.json'):
+    if not os.path.exists(template_dir): return
+    for f in os.listdir(template_dir):
+        if f.endswith('.json'):
             try:
-                path = os.path.join(template_dir, filename)
-                with open(path, 'r', encoding='utf-8') as f:
-                    templates[filename[:-5]] = json.load(f)
-                logger.info(f"Loaded template: {filename}")
+                with open(os.path.join(template_dir, f), 'r', encoding='utf-8') as file:
+                    templates[f[:-5]] = json.load(file)
             except Exception as e:
-                logger.error(f"Failed to load template {filename}: {e}")
+                logger.error(f"Template load error {f}: {e}")
 
 @app.on_event("startup")
 async def startup_event():
     await initialize_models()
 
+# Endpoints
 @app.get("/")
-async def root():
-    return {"message": "Sarkari-Sarathi API is running"}
+def root(): return {"message": "Sarkari-Sarathi API (Offline Mode)"}
 
 @app.get("/health")
-async def health_check():
-    """Health check endpoint with model status"""
+def health():
     return {
         "status": "ok",
-        "models": {
-            "nepali_asr": {
-                "loaded": nepali_asr is not None and nepali_asr.pipe is not None,
-                "model_name": nepali_asr.model_name if nepali_asr else None
-            },
-            "whisper": {
-                "loaded": whisper_model is not None
-            },
-            "gemini": {
-                "loaded": gemini_model is not None,
-                "api_key_set": bool(os.getenv("GEMINI_API_KEY"))
-            }
-        },
-        "templates_loaded": len(templates)
+        "nepali_asr": nepali_asr is not None and nepali_asr.pipe is not None,
+        "whisper": whisper_model is not None,
+        "tesseract": shutil.which("tesseract") is not None,
+        "cnn_handwriting": _CNN_AVAILABLE and cnn_recognizer is not None and cnn_recognizer.loaded,
     }
 
 @app.post("/transcribe-audio")
-async def transcribe_audio(
-    audio: UploadFile = File(...),
-    _rate_limit: bool = Depends(check_rate_limit_dependency),
-    _api_key: bool = Depends(verify_api_key)
-):
-    """
-    Transcribe audio using Nepali ASR model (with Whisper fallback)
-    """
-    import subprocess
+async def transcribe_audio(audio: UploadFile = File(...)):
+    suffix = os.path.splitext(audio.filename)[1] or ".wav"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(await audio.read())
+        tmp_path = tmp.name
     
-    # Determine suffix from content type
-    content_type = audio.content_type or ''
-    suffix = ".wav"
-    if 'webm' in content_type:
-        suffix = ".webm"
-    elif 'ogg' in content_type:
-        suffix = ".ogg"
-    elif 'mp4' in content_type or 'mpeg' in content_type:
-        suffix = ".mp4"
+    wav_path = tmp_path + ".wav"
+    conversion_success = False
+    
+    # Try to convert audio to WAV format (16kHz mono)
+    # Method 1: Use FFmpeg directly with full path
+    if FFMPEG_PATH and os.path.exists(FFMPEG_PATH):
+        try:
+            result = subprocess.run(
+                [FFMPEG_PATH, '-y', '-i', tmp_path, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wav_path],
+                capture_output=True, check=True, timeout=30
+            )
+            conversion_success = os.path.exists(wav_path) and os.path.getsize(wav_path) > 100
+            logger.info(f"FFmpeg conversion {'succeeded' if conversion_success else 'failed'}")
+        except Exception as e:
+            logger.warning(f"FFmpeg conversion failed: {e}")
+    
+    # Method 2: Fallback to pydub
+    if not conversion_success:
+        try:
+            from pydub import AudioSegment
+            audio_seg = AudioSegment.from_file(tmp_path)
+            audio_seg = audio_seg.set_frame_rate(16000).set_channels(1)
+            audio_seg.export(wav_path, format="wav")
+            conversion_success = os.path.exists(wav_path) and os.path.getsize(wav_path) > 100
+            logger.info(f"Pydub conversion {'succeeded' if conversion_success else 'failed'}")
+        except Exception as e:
+            logger.warning(f"Pydub conversion failed: {e}")
+    
+    # Use original file if conversion failed
+    if not conversion_success:
+        wav_path = tmp_path
+        logger.warning("Audio conversion failed, using original file")
 
-    # Save uploaded audio temporarily
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
-        content = await audio.read()
-        tmp_file.write(content)
-        tmp_file_path = tmp_file.name
-    
-    wav_path = tmp_file_path
-    
+    text = ""
+    model_used = ""
     try:
-        # Convert to WAV 16kHz mono if not already WAV (browser typically sends webm)
-        if suffix != ".wav":
-            wav_path = tmp_file_path.replace(suffix, "_converted.wav")
-            try:
-                # Get ffmpeg path
-                try:
-                    import imageio_ffmpeg
-                    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-                except ImportError:
-                    ffmpeg_exe = "ffmpeg"
-                
-                result = subprocess.run(
-                    [ffmpeg_exe, '-y', '-i', tmp_file_path, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wav_path],
-                    capture_output=True, text=True, timeout=30
-                )
-                if result.returncode != 0:
-                    logger.error(f"FFmpeg conversion error: {result.stderr}")
-                    wav_path = tmp_file_path  # Try with original file
-                else:
-                    logger.info(f"Converted {suffix} to WAV successfully")
-            except Exception as conv_err:
-                logger.warning(f"Audio conversion failed: {conv_err}, trying with original file")
-                wav_path = tmp_file_path
+        if nepali_asr and nepali_asr.pipe:
+            text = nepali_asr.transcribe_audio_file(wav_path)
+            model_used = "nepali_asr"
         
-        transcription = None
-        language_detected = "ne"
-        model_used = None  # Track which model actually produced the transcription
-        
-        # Try Nepali ASR first
-        if nepali_asr and nepali_asr.pipe is not None:
-            try:
-                logger.info("Using Nepali ASR model for transcription")
-                transcription = nepali_asr.transcribe_audio_file(wav_path)
-                model_used = "nepali_asr"
-                logger.info(f"Nepali ASR transcription successful: {transcription[:50]}...")
-            except Exception as e:
-                logger.warning(f"Nepali ASR failed: {e}")
-        
-        # Fallback to generic Whisper if Nepali ASR fails
-        if not transcription and whisper_model:
-            try:
-                logger.info("Falling back to generic Whisper model")
-                result = whisper_model.transcribe(wav_path)
-                transcription = result["text"]
-                language_detected = result.get("language", "ne")
-                model_used = "whisper_fallback"
-                logger.info(f"Whisper transcription successful: {transcription[:50]}...")
-            except Exception as e:
-                logger.error(f"Whisper fallback also failed: {e}")
-        
-        # Fallback to Gemini if both ASR models fail
-        if not transcription and gemini_model:
-            try:
-                logger.info("Falling back to Gemini for audio transcription")
-                # Read the wav file and send to Gemini
-                audio_file_path = wav_path if os.path.exists(wav_path) else tmp_file_path
-                
-                # Gemini needs audio as a file upload or inline data
-                # Use the google.generativeai File API for better handling
-                import base64 as b64
-                
-                with open(audio_file_path, 'rb') as af:
-                    audio_bytes = af.read()
-                
-                audio_b64 = b64.b64encode(audio_bytes).decode('utf-8')
-                
-                # Use Gemini's audio understanding with proper inline_data format
-                prompt = """यो अडियो फाइलमा नेपाली भाषामा बोलिएको छ। कृपया सुन्नुहोस् र शुद्ध नेपाली युनिकोडमा लेख्नुहोस्।
-केवल बोलिएको पाठ मात्र लेख्नुहोस्, अरू केही नलेख्नुहोस्।"""
-                
-                # Create inline data part for Gemini
-                audio_part = {
-                    "inline_data": {
-                        "mime_type": "audio/wav",
-                        "data": audio_b64
-                    }
-                }
-                
-                logger.info(f"Sending {len(audio_bytes)} bytes of audio to Gemini...")
-                response = await asyncio.to_thread(gemini_model.generate_content, [prompt, audio_part])
-                transcription = response.text.strip() if response.text else ""
-                
-                if transcription:
-                    model_used = "gemini_audio"
-                    logger.info(f"Gemini audio transcription: {transcription[:50]}...")
-                else:
-                    logger.warning("Gemini returned empty transcription")
-            except Exception as e:
-                logger.warning(f"Gemini audio fallback also failed: {e}", exc_info=True)
-        
-        if not transcription:
-            raise HTTPException(status_code=500, detail="सबै ट्रान्सक्रिप्शन विधिहरू असफल भए। कृपया स्पष्ट रूपमा बोल्नुहोस् र पुनः प्रयास गर्नुहोस्।")
-        
-        # Post-process: correct Nepali grammar
-        corrected_transcription = await correct_nepali_grammar(transcription)
-        
-        # Clean up temporary files
-        for f in [tmp_file_path, wav_path]:
-            try:
-                if os.path.exists(f):
-                    os.unlink(f)
-            except:
-                pass
+        if not text and whisper_model:
+            text = whisper_model.transcribe(wav_path, language='ne').get("text", "")
+            model_used = "whisper"
+            
+        if not text: raise HTTPException(500, "Transcription failed")
         
         return {
-            "transcription": corrected_transcription,
-            "raw_transcription": transcription,
-            "language": language_detected,
-            "model_used": model_used,
-            "grammar_corrected": corrected_transcription != transcription
+            "transcription": correct_nepali_text(text),
+            "raw_transcription": text,
+            "model_used": model_used
         }
-    
-    except HTTPException:
-        # Re-raise HTTP exceptions
-        raise
-    except Exception as e:
-        # Clean up temporary files if they exist
-        for f in [tmp_file_path, wav_path]:
-            try:
-                if os.path.exists(f):
-                    os.unlink(f)
-            except:
-                pass
-        logger.error(f"Transcription error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
-
-@app.get("/asr-status")
-async def get_asr_status():
-    """Get the status of ASR models"""
-    global nepali_asr, whisper_model
-    
-    status = {
-        "nepali_asr": {
-            "available": nepali_asr is not None and nepali_asr.pipe is not None,
-            "model": nepali_asr.model_name if nepali_asr else None,
-            "device": nepali_asr.device if nepali_asr else None
-        },
-        "whisper_fallback": {
-            "available": whisper_model is not None,
-            "model": "openai/whisper-small" if whisper_model else None
-        }
-    }
-    
-    return status
+    finally:
+        if os.path.exists(tmp_path): os.unlink(tmp_path)
+        if os.path.exists(wav_path) and wav_path != tmp_path: os.unlink(wav_path)
 
 @app.post("/transliterate")
-async def transliterate_text(
-    request: TransliterationRequest,
-    _rate_limit: bool = Depends(check_rate_limit_dependency)
-):
-    """Translate/Transliterate text using Gemini AI with offline fallback"""
-    try:
-        if gemini_model and request.text.strip():
-            # Use Gemini for translation
-            if request.from_lang == "en" and request.to_lang == "ne":
-                prompt = f"""Translate the following English text to Nepali. Only return the Nepali translation, nothing else.
-
-English: {request.text}
-
-Nepali:"""
-            elif request.from_lang == "ne" and request.to_lang == "en":
-                prompt = f"""Translate the following Nepali text to English. Only return the English translation, nothing else.
-
-Nepali: {request.text}
-
-English:"""
-            else:
-                # Transliterate English to Nepali phonetically
-                prompt = f"""Transliterate the following English text to Nepali script (phonetically). Only return the Nepali script, nothing else.
-
-English: {request.text}
-
-Nepali:"""
-            
-            response = gemini_model.generate_content(prompt)
-            nepali_text = response.text.strip()
-            logger.info(f"Translation: '{request.text}' -> '{nepali_text}'")
-            return {"original_text": request.text, "transliterated_text": nepali_text}
-        else:
-            # No Gemini model — use offline transliteration
-            result = offline_transliterate(request.text)
-            return {"original_text": request.text, "transliterated_text": result, "method": "offline"}
-    except Exception as e:
-        logger.error(f"Translation error: {e}")
-        # Fallback to offline transliteration instead of returning original text
-        try:
-            result = offline_transliterate(request.text)
-            return {"original_text": request.text, "transliterated_text": result, "method": "offline_fallback"}
-        except:
-            return {"original_text": request.text, "transliterated_text": request.text}
-
+async def transliterate_endpoint(req: TransliterationRequest):
+    result = offline_transliterate(req.text)
+    # Apply Unicode normalization
+    import unicodedata
+    result = unicodedata.normalize('NFC', result)
+    return {"original_text": req.text, "transliterated_text": result, "method": "offline"}
 
 def offline_transliterate(text: str) -> str:
     """
-    Offline English-to-Nepali phonetic transliteration.
-    Maps Roman/English characters to Devanagari equivalents.
+    Enhanced Roman-to-Nepali transliteration with improved pattern matching.
     """
-    # Multi-character mappings (check longer sequences first)
+    if not text:
+        return ""
+    
+    import unicodedata
+    
+    # Multi-character mappings (longest patterns first for priority)
     multi_map = {
-        'shri': 'श्री', 'shr': 'श्र', 'ksh': 'क्ष', 'tra': 'त्र', 'gya': 'ज्ञ',
-        'chh': 'छ', 'thh': 'ठ', 'dhh': 'ढ', 'shh': 'ष',
-        'kha': 'खा', 'gha': 'घा', 'cha': 'चा', 'chha': 'छा',
-        'jha': 'झा', 'tha': 'था', 'dha': 'धा', 'pha': 'फा',
-        'bha': 'भा', 'sha': 'शा',
-        'kh': 'ख', 'gh': 'घ', 'ng': 'ङ',
-        'ch': 'च', 'jh': 'झ', 'ny': 'ञ',
-        'th': 'थ', 'dh': 'ध', 'ph': 'फ',
-        'bh': 'भ', 'sh': 'श',
-        'aa': 'ा', 'ee': 'ी', 'oo': 'ू', 'ai': 'ै', 'au': 'ौ',
-        'ou': 'ौ', 'ei': 'ै',
+        # Conjuncts and special combinations
+        'shri': 'श्री', 'shree': 'श्री',
+        'kshya': 'क्ष्य', 'ksha': 'क्षा', 'ksh': 'क्ष',
+        'gya': 'ज्ञ', 'dnya': 'ज्ञ', 'gnya': 'ज्ञ',
+        'tra': 'त्र', 'tri': 'त्रि', 'tru': 'त्रु',
+        'dra': 'द्र', 'dri': 'द्रि',
+        'pra': 'प्र', 'pri': 'प्रि',
+        'bra': 'ब्र', 'bri': 'ब्रि',
+        'shr': 'श्र', 'shra': 'श्रा',
+        'ntr': 'न्त्र', 'ndr': 'न्द्र',
+        'str': 'स्त्र', 'sta': 'स्ता',
+        'sth': 'स्थ', 'stha': 'स्था',
+        'sna': 'स्ना', 'swa': 'स्वा', 'sw': 'स्व',
+        'tth': 'त्थ', 'ddh': 'द्ध',
+        'nch': 'न्च', 'nj': 'न्ज', 'nd': 'न्द', 'nt': 'न्त',
+        'mp': 'म्प', 'mb': 'म्ब',
+        'ng': 'ङ', 'nk': 'ङ्क', 
+        'rya': 'र्य', 'ryu': 'र्यु',
+        # Aspirated consonants with vowels
+        'chha': 'छा', 'chhi': 'छि', 'chhu': 'छु', 'chhe': 'छे', 'chho': 'छो',
+        'chh': 'छ',
+        'kha': 'खा', 'khi': 'खि', 'khu': 'खु', 'khe': 'खे', 'kho': 'खो',
+        'kh': 'ख',
+        'gha': 'घा', 'ghi': 'घि', 'ghu': 'घु', 'ghe': 'घे', 'gho': 'घो',
+        'gh': 'घ',
+        'cha': 'चा', 'chi': 'चि', 'chu': 'चु', 'che': 'चे', 'cho': 'चो',
+        'ch': 'च',
+        'jha': 'झा', 'jhi': 'झि', 'jhu': 'झु', 'jhe': 'झे', 'jho': 'झो',
+        'jh': 'झ',
+        'tha': 'था', 'thi': 'थि', 'thu': 'थु', 'the': 'थे', 'tho': 'थो',
+        'th': 'थ',
+        'dha': 'धा', 'dhi': 'धि', 'dhu': 'धु', 'dhe': 'धे', 'dho': 'धो',
+        'dh': 'ध',
+        'pha': 'फा', 'phi': 'फि', 'phu': 'फु', 'phe': 'फे', 'pho': 'फो',
+        'ph': 'फ',
+        'bha': 'भा', 'bhi': 'भि', 'bhu': 'भु', 'bhe': 'भे', 'bho': 'भो',
+        'bh': 'भ',
+        'sha': 'शा', 'shi': 'शि', 'shu': 'शु', 'she': 'शे', 'sho': 'शो',
+        'sh': 'श',
+        'ny': 'ञ',
+        # Vowel combinations
+        'aa': 'ा', 'ee': 'ी', 'ii': 'ी', 'oo': 'ू', 'uu': 'ू',
+        'ai': 'ै', 'au': 'ौ', 'ou': 'ौ', 'ei': 'ै',
+        'ri': 'ृ', 'ru': 'ू',
+        # Retroflex consonants
+        'tt': 'ट', 'tth': 'ठ', 'dd': 'ड', 'ddh': 'ढ', 'nn': 'ण',
     }
     
-    # Single character vowel mappings (standalone & matra)
+    # Standalone vowels (at word beginning or after another vowel)
     vowel_standalone = {
-        'a': 'अ', 'i': 'इ', 'u': 'उ', 'e': 'ए', 'o': 'ओ',
-    }
-    vowel_matra = {
-        'a': '', 'i': 'ि', 'u': 'ु', 'e': 'े', 'o': 'ो',
+        'a': 'अ', 'i': 'इ', 'u': 'उ', 'e': 'ए', 'o': 'ओ'
     }
     
-    # Single consonant mappings
+    # Vowel matras (after consonant)
+    vowel_matra = {
+        'a': '', 'i': 'ि', 'u': 'ु', 'e': 'े', 'o': 'ो'
+    }
+    
+    # Basic consonants
     consonant_map = {
         'k': 'क', 'g': 'ग', 'c': 'च', 'j': 'ज', 't': 'त',
         'd': 'द', 'n': 'न', 'p': 'प', 'b': 'ब', 'm': 'म',
         'y': 'य', 'r': 'र', 'l': 'ल', 'v': 'व', 'w': 'व',
-        's': 'स', 'h': 'ह', 'f': 'फ', 'z': 'ज़', 'x': 'क्स',
-        'q': 'क',
+        's': 'स', 'h': 'ह', 'f': 'फ', 'z': 'ज़', 'x': 'क्स', 'q': 'क'
     }
     
-    # Common word translations for form fields
+    # Common full word mappings
     word_map = {
-        'name': 'नाम', 'first name': 'पहिलो नाम', 'last name': 'थर',
-        'father': 'बुबा', 'mother': 'आमा', 'address': 'ठेगाना',
-        'phone': 'फोन', 'email': 'इमेल', 'date': 'मिति',
-        'district': 'जिल्ला', 'province': 'प्रदेश', 'ward': 'वडा',
-        'municipality': 'नगरपालिका', 'village': 'गाउँ', 'city': 'शहर',
-        'male': 'पुरुष', 'female': 'महिला', 'age': 'उमेर',
+        'nepal': 'नेपाल', 'kathmandu': 'काठमाडौं', 'pokhara': 'पोखरा',
+        'address': 'ठेगाना', 'date': 'मिति', 'name': 'नाम',
+        'province': 'प्रदेश', 'district': 'जिल्ला', 'ward': 'वडा',
+        'municipality': 'नगरपालिका', 'village': 'गाउँ',
+        'father': 'बुबा', 'mother': 'आमा', 'son': 'छोरा', 'daughter': 'छोरी',
+        'husband': 'पति', 'wife': 'पत्नी', 'male': 'पुरुष', 'female': 'महिला',
         'birth': 'जन्म', 'death': 'मृत्यु', 'marriage': 'विवाह',
-        'husband': 'पति', 'wife': 'पत्नी', 'son': 'छोरा', 'daughter': 'छोरी',
-        'yes': 'हो', 'no': 'होइन', 'number': 'नम्बर',
-        'citizenship': 'नागरिकता', 'certificate': 'प्रमाणपत्र',
-        'application': 'निवेदन', 'registration': 'दर्ता',
-        'signature': 'हस्ताक्षर', 'photo': 'फोटो',
-        'occupation': 'पेशा', 'religion': 'धर्म', 'nationality': 'राष्ट्रियता',
-        'country': 'देश', 'nepal': 'नेपाल',
-        'road': 'सडक', 'water': 'पानी', 'electricity': 'बिजुली',
-        'school': 'विद्यालय', 'hospital': 'अस्पताल',
-        'government': 'सरकार', 'office': 'कार्यालय',
+        'application': 'निवेदन', 'certificate': 'प्रमाणपत्र',
+        'year': 'वर्ष', 'month': 'महिना', 'day': 'दिन',
+        'sharma': 'शर्मा', 'thapa': 'थापा', 'gurung': 'गुरुङ',
+        'tamang': 'तामाङ', 'rai': 'राई', 'limbu': 'लिम्बु',
+        'shrestha': 'श्रेष्ठ', 'magar': 'मगर', 'newar': 'नेवार',
+        'bahadur': 'बहादुर', 'kumar': 'कुमार', 'devi': 'देवी',
+        'maya': 'माया', 'laxmi': 'लक्ष्मी', 'krishna': 'कृष्ण',
+        'ram': 'राम', 'sita': 'सीता', 'hari': 'हरि', 'shiva': 'शिव',
     }
     
+    # Check for full word match first
     text_lower = text.lower().strip()
-    
-    # Check if whole text matches a known word/phrase
     if text_lower in word_map:
         return word_map[text_lower]
-    
-    # Character-by-character transliteration
+
     result = []
     i = 0
     after_consonant = False
@@ -550,31 +366,51 @@ def offline_transliterate(text: str) -> str:
         char = text[i].lower()
         matched = False
         
-        # Skip spaces and punctuation
+        # Handle spaces
         if char == ' ':
             result.append(' ')
             after_consonant = False
             i += 1
             continue
-        if char in '.,;:!?()[]{}"\'-/\\@#$%^&*+=<>|~`':
-            result.append(char)
-            after_consonant = False
-            i += 1
-            continue
-        if char.isdigit():
-            # Convert to Devanagari digits
-            devanagari_digits = '०१२३४५६७८९'
-            result.append(devanagari_digits[int(char)])
+        
+        # Handle digits - convert to Devanagari
+        if char in '0123456789':
+            result.append('०१२३४५६७८९'[int(char)])
             after_consonant = False
             i += 1
             continue
         
-        # Try multi-character matches (longest first)
-        for length in range(4, 1, -1):
+        # Handle punctuation
+        if not char.isalpha():
+            result.append(char)
+            after_consonant = False
+            i += 1
+            continue
+        
+        # Multi-character matches (try longest first)
+        for length in range(5, 1, -1):
+            if i + length > len(text):
+                continue
             substr = text[i:i+length].lower()
             if substr in multi_map:
-                result.append(multi_map[substr])
-                after_consonant = substr[-1] not in 'aeiou'
+                # Check if this is a vowel matra or consonant
+                mapped = multi_map[substr]
+                if mapped in ['ा', 'ि', 'ी', 'ु', 'ू', 'े', 'ै', 'ो', 'ौ', 'ृ']:
+                    # It's a vowel matra
+                    if after_consonant:
+                        result.append(mapped)
+                    else:
+                        # Convert matra to standalone vowel
+                        matra_to_vowel = {
+                            'ा': 'आ', 'ि': 'इ', 'ी': 'ई', 'ु': 'उ', 'ू': 'ऊ',
+                            'े': 'ए', 'ै': 'ऐ', 'ो': 'ओ', 'ौ': 'औ', 'ृ': 'ऋ'
+                        }
+                        result.append(matra_to_vowel.get(mapped, mapped))
+                    after_consonant = False
+                else:
+                    result.append(mapped)
+                    # Check if ends with vowel
+                    after_consonant = not any(substr.endswith(v) for v in 'aeiou')
                 i += length
                 matched = True
                 break
@@ -582,13 +418,14 @@ def offline_transliterate(text: str) -> str:
         if matched:
             continue
         
-        # Single character
+        # Single consonant
         if char in consonant_map:
             if after_consonant:
-                result.append('्')  # halant to join consonants
+                result.append('्')  # Halant to join consonants
             result.append(consonant_map[char])
             after_consonant = True
             i += 1
+        # Single vowel
         elif char in vowel_standalone:
             if after_consonant:
                 result.append(vowel_matra[char])
@@ -597,483 +434,429 @@ def offline_transliterate(text: str) -> str:
             after_consonant = False
             i += 1
         else:
-            result.append(char)
+            # Unknown character - pass through
+            result.append(text[i])
             after_consonant = False
             i += 1
     
-    return ''.join(result)
-
-class HandwritingRequest(BaseModel):
-    image: str  # Base64 encoded image data
-
-class GrammarCorrectionRequest(BaseModel):
-    text: str
-    context: str = ""  # optional field label / context
-
-
-async def correct_nepali_grammar(text: str, context: str = "") -> str:
-    """Post-process Nepali text for grammar correction using Gemini."""
-    if not gemini_model or not text or not text.strip():
-        return text
-    try:
-        ctx_hint = f" (यो फिल्ड: {context})" if context else ""
-        prompt = (
-            "तपाईंलाई नेपाली पाठ दिइएको छ। कृपया यसलाई शुद्ध नेपाली व्याकरणमा सच्याउनुहोस्।\n"
-            "- मात्रा, हलन्त, र विसर्ग ठीक गर्नुहोस्\n"
-            "- शब्द क्रम र विभक्ति मिलाउनुहोस्\n"
-            "- अर्थ नबिगार्नुहोस्, केवल व्याकरण सच्याउनुहोस्\n"
-            "- केवल सच्याइएको नेपाली पाठ मात्र फर्काउनुहोस्, अरू केही नलेख्नुहोस्\n"
-            f"{ctx_hint}\n\n"
-            f"पाठ: {text}\n\n"
-            "शुद्ध पाठ:"
-        )
-        # Run synchronous Gemini call in threadpool to avoid blocking the event loop
-        response = await asyncio.to_thread(gemini_model.generate_content, prompt)
-        corrected = response.text.strip()
-        # Sanity check: if Gemini returned something wildly different or empty, keep original
-        if not corrected or len(corrected) > len(text) * 3:
-            return text
-        logger.info(f"Grammar correction: '{text[:40]}' -> '{corrected[:40]}'")
-        return corrected
-    except Exception as e:
-        logger.warning(f"Grammar correction failed, returning original: {e}")
-        return text
-
-
-# Simple in-memory rate limiter for grammar correction endpoint
-_grammar_rate_limit_store: Dict[str, list] = {}
-GRAMMAR_RATE_LIMIT_MAX_REQUESTS = 10  # Max requests per window
-GRAMMAR_RATE_LIMIT_WINDOW_SECONDS = 60  # Time window in seconds
-MAX_GRAMMAR_TEXT_LENGTH = 5000  # Maximum text length for grammar correction
-
-
-def check_rate_limit(client_ip: str) -> bool:
-    """Check if client is within rate limit. Returns True if allowed, False if limited."""
-    now = datetime.now().timestamp()
-    window_start = now - GRAMMAR_RATE_LIMIT_WINDOW_SECONDS
-    
-    if client_ip not in _grammar_rate_limit_store:
-        _grammar_rate_limit_store[client_ip] = []
-    
-    # Clean old entries
-    _grammar_rate_limit_store[client_ip] = [
-        ts for ts in _grammar_rate_limit_store[client_ip] if ts > window_start
-    ]
-    
-    # Check limit
-    if len(_grammar_rate_limit_store[client_ip]) >= GRAMMAR_RATE_LIMIT_MAX_REQUESTS:
-        return False
-    
-    # Record this request
-    _grammar_rate_limit_store[client_ip].append(now)
-    return True
-
+    output = ''.join(result)
+    # Apply Unicode NFC normalization
+    return unicodedata.normalize('NFC', output)
 
 @app.post("/correct-grammar")
-async def correct_grammar_endpoint(
-    request: GrammarCorrectionRequest,
-    req: Request,
-    _rate_limit: bool = Depends(check_rate_limit_dependency),
-    _api_key: bool = Depends(verify_api_key)
-):
-    """Correct Nepali grammar in the given text using Gemini AI"""
-    # Get client IP for rate limiting
-    client_ip = req.client.host if req.client else "unknown"
-    
-    # Check rate limit
-    if not check_rate_limit(client_ip):
-        raise HTTPException(
-            status_code=429, 
-            detail="Too many requests. Please wait before trying again."
-        )
-    
-    # Validate text length
-    if len(request.text) > MAX_GRAMMAR_TEXT_LENGTH:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Text too long. Maximum {MAX_GRAMMAR_TEXT_LENGTH} characters allowed."
-        )
-    
-    corrected = await correct_nepali_grammar(request.text, request.context)
-    return {"original": request.text, "corrected": corrected}
+async def correct_grammar_endpoint(req: GrammarCorrectionRequest):
+    return {"original": req.text, "corrected": correct_nepali_text(req.text)}
 
-
-# currently gemini
-# Local model to be made
-# Needs lots of fixing
 @app.post("/recognize-handwriting")
-async def recognize_handwriting(request: HandwritingRequest):
-    """Recognize handwritten text from canvas image using Gemini Vision"""
+async def recognize_handwriting(req: HandwritingRequest):
+    """
+    Recognize handwritten Nepali text from a canvas image.
+    
+    Strategy:
+      1. Try CNN word classifier first (fast, accurate for known vocabulary)
+      2. Fall back to Tesseract OCR if CNN fails or has low confidence
+    """
     try:
-        if not gemini_model:
-            raise HTTPException(status_code=503, detail="AI model not available. Please set GEMINI_API_KEY in .env.config")
-        
-        # Extract base64 image data (remove data:image/png;base64, prefix if present)
-        image_data = request.image
-        if ',' in image_data:
-            image_data = image_data.split(',')[1]
-        
-        import base64
-        from PIL import Image
-        import io
-        
-        # Decode base64 to image
-        image_bytes = base64.b64decode(image_data)
-        image = Image.open(io.BytesIO(image_bytes))
-        
-        logger.info(f"Received image: mode={image.mode}, size={image.size}")
-        
-        # Verify image has actual content (not blank)
-        # Check for any pixel with significant alpha (drawn content)
-        has_content = False
-        img_array = list(image.getdata())
-        for pixel in img_array:
-            if len(pixel) == 4:  # RGBA
-                r, g, b, a = pixel
-                # Any pixel with alpha > 10 means something was drawn
-                if a > 10:
-                    has_content = True
-                    break
-            elif len(pixel) == 3:  # RGB
-                r, g, b = pixel
-                # For non-RGBA, check for non-white pixels
-                if r < 240 or g < 240 or b < 240:
-                    has_content = True
-                    break
-        
-        if not has_content:
-            logger.warning("Canvas appears empty - no drawn content detected")
-            return {"text": "", "success": False, "detail": "Canvas appears empty"}
-        
-        # Convert RGBA to RGB with white background for better recognition
-        if image.mode == 'RGBA':
-            # Create white background
-            background = Image.new('RGB', image.size, (255, 255, 255))
-            # Paste the image using alpha channel as mask
-            background.paste(image, mask=image.split()[3])
-            image = background
-            logger.info("Converted RGBA to RGB with white background")
-        
-        # Use Gemini Vision to recognize handwriting — focused Nepali prompt
-        prompt = """यो छविमा हातले लेखिएको नेपाली (देवनागरी लिपि) पाठ छ।
-कृपया छविमा देखिएको सबै पाठ ध्यानपूर्वक पढ्नुहोस् र लेख्नुहोस्।
-नियमहरू:
-1. केवल पढिएको पाठ मात्र फर्काउनुहोस्
-2. यदि देवनागरी लिपि हो भने नेपाली युनिकोडमा लेख्नुहोस्  
-3. यदि English अक्षर देखिन्छ भने English मा नै राख्नुहोस्
-4. कुनै व्याख्या वा थप टिप्पणी नलेख्नुहोस्
-5. शुद्ध नेपाली व्याकरणमा लेख्नुहोस्"""
-        
-        logger.info("Sending image to Gemini for recognition...")
-        response = await asyncio.to_thread(gemini_model.generate_content, [prompt, image])
-        recognized_text = response.text.strip()
-        
-        logger.info(f"Gemini raw response: {recognized_text[:200] if recognized_text else '(empty)'}")
-        
-        # Remove any markdown formatting Gemini might add
-        recognized_text = recognized_text.strip('`').strip('*').strip()
-        if recognized_text.startswith('```'):
-            recognized_text = recognized_text.split('\n', 1)[-1].rsplit('```', 1)[0].strip()
-        
-        logger.info(f"Handwriting recognition result: {recognized_text[:100] if recognized_text else '(empty)'}")
-        
-        return {"text": recognized_text, "success": True}
-        
-    except HTTPException:
-        raise
+        img_bytes = base64.b64decode(req.image.split(',')[1] if ',' in req.image else req.image)
+        img = Image.open(io.BytesIO(img_bytes))
     except Exception as e:
-        logger.error(f"Handwriting recognition error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Recognition failed: {str(e)}")
+        logger.error(f"Image decode error: {e}")
+        raise HTTPException(400, "Invalid image data")
+    
+    # ────────────────────────────────────────────────────────────────
+    #  METHOD 1: CNN Word Classifier  (preferred)
+    # ────────────────────────────────────────────────────────────────
+    if _CNN_AVAILABLE and cnn_recognizer and cnn_recognizer.loaded:
+        try:
+            result = recognize_handwriting_image(img, top_k=5)
+            if result.get("success") and result.get("confidence", 0) > 0.4:
+                logger.info(f"CNN recognition: '{result['text']}' (conf={result['confidence']:.2f})")
+                return {
+                    "text": correct_nepali_text(result["text"]),
+                    "confidence": result["confidence"],
+                    "alternatives": result.get("alternatives", []),
+                    "method": "cnn",
+                    "success": True
+                }
+            else:
+                logger.info(f"CNN low confidence ({result.get('confidence', 0):.2f}), trying Tesseract...")
+        except Exception as e:
+            logger.warning(f"CNN recognition error: {e}")
+    
+    # ────────────────────────────────────────────────────────────────
+    #  METHOD 2: Tesseract OCR  (fallback)
+    # ────────────────────────────────────────────────────────────────
+    if not shutil.which("tesseract"):
+        # No Tesseract and CNN failed — return error
+        if _CNN_AVAILABLE:
+            return {"text": "", "success": False, "error": "Recognition failed"}
+        raise HTTPException(503, "No recognition engine available (install Tesseract or train CNN model)")
+    
+    try:
+        import numpy as np
+
+        # ------------------------------------------------------------------
+        # FIX: Canvas has TRANSPARENT background + black strokes.
+        # img.convert('L') turns transparent pixels to BLACK, making the
+        # entire image black → Tesseract cannot see any text.
+        # Solution: composite onto a WHITE background first.
+        # ------------------------------------------------------------------
+
+        # 1. Composite transparent image onto white background
+        if img.mode in ('RGBA', 'LA', 'PA'):
+            white_bg = Image.new('RGBA', img.size, (255, 255, 255, 255))
+            white_bg.paste(img, mask=img.split()[-1])  # use alpha as mask
+            img = white_bg.convert('L')
+        else:
+            img = img.convert('L')
+
+        # 2. Crop to content bounding box (remove excess whitespace)
+        img_array = np.array(img)
+        # Find rows/cols with any dark pixel (< 240)
+        dark_mask = img_array < 240
+        rows_with_content = np.any(dark_mask, axis=1)
+        cols_with_content = np.any(dark_mask, axis=0)
+        if not np.any(rows_with_content):
+            return {"text": "", "success": False}
+        row_min, row_max = np.where(rows_with_content)[0][[0, -1]]
+        col_min, col_max = np.where(cols_with_content)[0][[0, -1]]
+        # Add small margin around content
+        margin = 10
+        row_min = max(0, row_min - margin)
+        row_max = min(img_array.shape[0] - 1, row_max + margin)
+        col_min = max(0, col_min - margin)
+        col_max = min(img_array.shape[1] - 1, col_max + margin)
+        img_array = img_array[row_min:row_max + 1, col_min:col_max + 1]
+
+        # 3. Upscale to at least 300 DPI equivalent (Tesseract optimal)
+        h, w = img_array.shape
+        scale = max(1, 300 * 6 // max(w, 1))  # target ~1800px wide
+        scale = min(scale, 4)                   # cap at 4x
+        if scale > 1:
+            img_up = Image.fromarray(img_array)
+            img_up = img_up.resize((w * scale, h * scale), Image.LANCZOS)
+            img_array = np.array(img_up)
+
+        # 4. Binarization — Otsu-style automatic threshold
+        # Use histogram to find optimal split between ink and background
+        hist, _ = np.histogram(img_array.ravel(), bins=256, range=(0, 256))
+        total = img_array.size
+        sum_total = np.sum(np.arange(256) * hist)
+        sum_bg = 0.0
+        w_bg = 0
+        max_var = 0.0
+        threshold = 128
+        for t in range(256):
+            w_bg += hist[t]
+            if w_bg == 0: continue
+            w_fg = total - w_bg
+            if w_fg == 0: break
+            sum_bg += t * hist[t]
+            mean_bg = sum_bg / w_bg
+            mean_fg = (sum_total - sum_bg) / w_fg
+            var_between = w_bg * w_fg * (mean_bg - mean_fg) ** 2
+            if var_between > max_var:
+                max_var = var_between
+                threshold = t
+        # Clamp threshold so we don't lose thin strokes
+        threshold = min(threshold + 20, 220)
+        binary = np.where(img_array < threshold, 0, 255).astype(np.uint8)
+
+        # 5. Fast morphological dilation (numpy-based, no slow loops)
+        # Thicken strokes so Tesseract can read thin handwriting
+        ink = (binary == 0)  # True where stroke
+        dilated = ink.copy()
+        for _ in range(2):
+            dilated = (
+                dilated
+                | np.roll(dilated, 1, axis=0)
+                | np.roll(dilated, -1, axis=0)
+                | np.roll(dilated, 1, axis=1)
+                | np.roll(dilated, -1, axis=1)
+            )
+        binary = np.where(dilated, 0, 255).astype(np.uint8)
+
+        # 6. Add generous white padding
+        pad = 60
+        padded = np.full(
+            (binary.shape[0] + pad * 2, binary.shape[1] + pad * 2),
+            255, dtype=np.uint8
+        )
+        padded[pad:pad + binary.shape[0], pad:pad + binary.shape[1]] = binary
+
+        img = Image.fromarray(padded)
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+            img.save(tmp, format="PNG")
+            tmp_path = tmp.name
+
+        try:
+            best_text = ''
+            best_conf = -1
+
+            # Try multiple Page Segmentation Modes for best result
+            for psm in ['6', '7', '13']:
+                try:
+                    res = subprocess.run([
+                        'tesseract', tmp_path, 'stdout',
+                        '-l', 'nep+eng',
+                        '--psm', psm,
+                        '--oem', '1',
+                        '-c', 'preserve_interword_spaces=1',
+                    ], capture_output=True, text=True, timeout=30)
+                    txt = res.stdout.strip()
+                    if not txt:
+                        continue
+                    # Clean garbage characters
+                    txt = _clean_ocr(txt)
+                    if not txt:
+                        continue
+                    # Simple confidence heuristic: longer meaningful text is better
+                    score = len(txt)
+                    if score > best_conf:
+                        best_conf = score
+                        best_text = txt
+                except Exception:
+                    continue
+
+            logger.info(f"Tesseract OCR result: '{best_text}' (score={best_conf})")
+            if best_text:
+                return {"text": correct_nepali_text(best_text), "method": "tesseract", "success": True}
+            return {"text": "", "method": "tesseract", "success": False}
+        finally:
+            if os.path.exists(tmp_path): os.unlink(tmp_path)
+    except Exception as e:
+        logger.error(f"Handwriting error: {e}")
+        raise HTTPException(500, str(e))
+
+
+def _clean_ocr(text: str) -> str:
+    """Remove OCR noise/garbage from recognized text."""
+    import re as _re
+    if not text:
+        return ''
+    # Remove control characters
+    text = _re.sub(r'[\x00-\x1f\x7f]', '', text).strip()
+    # Keep only lines with at least one Devanagari or Latin alphanumeric char
+    lines = text.split('\n')
+    good = [l.strip() for l in lines
+            if _re.search(r'[\u0900-\u097fa-zA-Z0-9]', l)]
+    text = ' '.join(good).strip()
+    text = _re.sub(r'\s+', ' ', text)
+    return text
 
 @app.post("/generate-document")
-async def generate_document(
-    request: DocumentRequest,
-    _rate_limit: bool = Depends(check_rate_limit_dependency),
-    _api_key: bool = Depends(verify_api_key)
-):
-    if request.document_type not in templates:
-        raise HTTPException(status_code=400, detail="Document template not found")
-    
-    template = templates[request.document_type]
-    
-    # Don't block on missing optional fields - just warn
-    missing_fields = []
-    for field in template.get("required_fields", []):
-        if field not in request.user_data or not str(request.user_data.get(field, '')).strip():
-            missing_fields.append(field)
-    
-    if missing_fields:
-        logger.warning(f"Missing fields for {request.document_type}: {missing_fields}")
-        # Only block if more than half are missing
-        if len(missing_fields) > len(template.get('required_fields', [])) / 2:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"धेरै आवश्यक फिल्डहरू छुटेकाछन्: {', '.join(missing_fields)}"
-            )
-    
+async def generate_document(req: DocumentRequest):
+    if req.document_type not in templates: raise HTTPException(400, "Template not found")
     try:
-        # Generate document content using template
-        document_content = fill_template(template, request.user_data)
-        
-        # Generate PDF
-        pdf_path = await generate_pdf(document_content, request.document_type, request.user_data)
-        
-        return {
-            "document_id": f"{request.document_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-            "pdf_path": pdf_path,
-            "content": document_content
-        }
-    
-    except HTTPException:
-        raise
+        content = fill_template(templates[req.document_type], req.user_data)
+        path = await generate_pdf(content, req.document_type, req.user_data)
+        return {"document_id": f"{req.document_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}", "pdf_path": path, "content": content}
     except Exception as e:
-        logger.error(f"Document generation failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"दस्तावेज उत्पन्न गर्न सकेन: {str(e)}")
+        logger.error(f"Doc gen error: {e}")
+        raise HTTPException(500, str(e))
 
-def fill_template(template: Dict, user_data: Dict) -> str:
-    """Fill template with user data"""
+def fill_template(template, data):
     content = template.get("content", "")
-    if not content:
-        # Build a basic content from user data
-        lines = []
-        for key, value in user_data.items():
-            if value:
-                lines.append(f"{key}: {value}")
-        return "\n".join(lines)
-    
-    # Replace placeholders with actual data
-    for key, value in user_data.items():
-        placeholder = f"{{{key}}}"
-        content = content.replace(placeholder, str(value) if value else '')
-    
-    # Add current date
-    current_date = datetime.now().strftime("%Y-%m-%d")
-    content = content.replace("{date}", current_date)
-    content = content.replace("{date_bs}", convert_to_bikram_sambat(current_date))
-    
-    # Remove any remaining unresolved placeholders like {something}
+    for k, v in data.items(): content = content.replace(f"{{{k}}}", str(v) if v else "")
+    date = datetime.now().strftime("%Y-%m-%d")
+    content = content.replace("{date}", date).replace("{date_bs}", convert_to_bikram_sambat(date))
     import re
-    content = re.sub(r'\{[a-zA-Z_]+\}', '..........', content)
-    
-    return content
+    return re.sub(r'\{[a-zA-Z_]+\}', '..........', content)
 
-def convert_to_bikram_sambat(date_gregorian: str) -> str:
-    """Convert Gregorian date to Bikram Sambat (approximate)"""
+def convert_to_bikram_sambat(date_str):
     try:
-        dt = datetime.strptime(date_gregorian, "%Y-%m-%d")
-        # Approximate BS = AD + 56 years 8 months
-        bs_year = dt.year + 56
-        bs_month = dt.month + 8
-        bs_day = dt.day + 16
-        if bs_day > 30:
-            bs_day -= 30
-            bs_month += 1
-        if bs_month > 12:
-            bs_month -= 12
-            bs_year += 1
-        return f"{bs_year}-{bs_month:02d}-{bs_day:02d}"
-    except:
-        return date_gregorian
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        y, m, d = dt.year+56, dt.month+8, dt.day+16
+        if d>30: d-=30; m+=1
+        if m>12: m-=12; y+=1
+        return f"{y}-{m:02d}-{d:02d}"
+    except: return date_str
 
-# Register Nepali font once at module level
-_nepali_font_registered = False
-_nepali_font_name = 'Helvetica'
-
-def _ensure_nepali_font():
-    global _nepali_font_registered, _nepali_font_name
-    if _nepali_font_registered:
-        return _nepali_font_name
+_font_reg = False
+_font_name = 'Helvetica'
+def _ensure_font():
+    global _font_reg, _font_name
+    if _font_reg: return _font_name
     try:
-        nepali_font_path = os.path.join(BASE_DIR, 'static', 'fonts', 'NotoSansDevanagari-Regular.ttf')
-        if os.path.exists(nepali_font_path):
-            pdfmetrics.registerFont(TTFont('NotoSansDevanagari', nepali_font_path))
-            _nepali_font_name = 'NotoSansDevanagari'
-            logger.info(f"Nepali font registered from {nepali_font_path}")
+        path = os.path.join(BASE_DIR, 'static', 'fonts', 'NotoSansDevanagari-Regular.ttf')
+        if os.path.exists(path):
+            pdfmetrics.registerFont(TTFont('NotoSansDevanagari', path))
+            _font_name = 'NotoSansDevanagari'
         else:
-            logger.warning(f"Nepali font not found at {nepali_font_path}")
-    except Exception as e:
-        logger.warning(f"Could not register Nepali font: {e}")
-    _nepali_font_registered = True
-    return _nepali_font_name
+             # Win fallback
+            import platform
+            if platform.system() == 'Windows':
+                sys_font = r'C:\Windows\Fonts\Nirmala.ttf'
+                if not os.path.exists(sys_font): sys_font = r'C:\Windows\Fonts\mangal.ttf'
+                if os.path.exists(sys_font):
+                    pdfmetrics.registerFont(TTFont('SystemNepali', sys_font))
+                    _font_name = 'SystemNepali'
+    except: pass
+    _font_reg = True
+    return _font_name
 
-async def generate_pdf(content: str, document_type: str, user_data: Dict) -> str:
-    """Generate PDF document with proper Nepali layout"""
-    output_dir = os.path.join(BASE_DIR, "generated_documents")
-    os.makedirs(output_dir, exist_ok=True)
+def _wrap_nepali_text(text, max_chars=45):
+    """
+    Wrap Nepali text accounting for Devanagari character widths.
+    Devanagari characters are approximately 1.5-2x width of ASCII.
+    Using conservative estimate of 45 chars per line for 11pt font on A4.
+    """
+    if not text:
+        return []
     
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{document_type}_{timestamp}.pdf"
-    filepath = os.path.join(output_dir, filename)
+    lines = []
+    for paragraph in text.split('\n'):
+        if not paragraph.strip():
+            lines.append('')
+            continue
+            
+        words = paragraph.split()
+        current_line = ''
+        
+        for word in words:
+            test_line = current_line + (' ' if current_line else '') + word
+            # Count Devanagari chars as 1.5 width
+            effective_len = 0
+            for ch in test_line:
+                if '\u0900' <= ch <= '\u097F':  # Devanagari range
+                    effective_len += 1.5
+                else:
+                    effective_len += 1
+            
+            if effective_len <= max_chars:
+                current_line = test_line
+            else:
+                if current_line:
+                    lines.append(current_line)
+                current_line = word
+        
+        if current_line:
+            lines.append(current_line)
     
-    c = canvas.Canvas(filepath, pagesize=A4)
-    width, height = A4
-    font_name = _ensure_nepali_font()
+    return lines
+
+async def generate_pdf(content, dtype, data):
+    out = os.path.join(BASE_DIR, "generated_documents")
+    os.makedirs(out, exist_ok=True)
+    fpath = os.path.join(out, f"{dtype}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
     
-    # Nepal Government Header
-    c.setFont(font_name, 14)
-    c.drawCentredString(width / 2, height - 0.7 * inch, "नेपाल सरकार")
+    c = canvas.Canvas(fpath, pagesize=A4)
+    w, h = A4
+    font = _ensure_font()
     
-    # Municipality from user data or default
-    municipality = user_data.get('municipality', '')
-    district = user_data.get('district', '')
-    province = user_data.get('province', '')
-    ward = user_data.get('ward', '')
+    # A4: 595.27 x 841.89 points (72 points/inch)
+    # Standard margins: 1 inch = 72 points
+    margin_left = 72
+    margin_right = 72
+    margin_top = 72
+    margin_bottom = 72
+    usable_width = w - margin_left - margin_right
+    line_height = 16  # Line height for 11pt font
     
-    c.setFont(font_name, 16)
-    header_text = municipality if municipality else "स्थानीय तह"
-    c.drawCentredString(width / 2, height - 1.0 * inch, header_text)
+    # Header Section
+    y = h - margin_top
     
-    c.setFont(font_name, 11)
-    if district and province:
-        c.drawCentredString(width / 2, height - 1.25 * inch, f"{district}, {province}")
+    c.setFont(font, 14)
+    c.drawCentredString(w/2, y, "नेपाल सरकार")
+    y -= 22
     
-    if ward:
-        c.setFont(font_name, 11)
-        c.drawCentredString(width / 2, height - 1.45 * inch, f"वडा नं. {ward} को कार्यालय")
+    c.setFont(font, 16)
+    municipality = str(data.get('municipality', 'स्थानीय तह'))
+    c.drawCentredString(w/2, y, municipality)
+    y -= 18
+    
+    c.setFont(font, 11)
+    if data.get('district') and data.get('province'): 
+        c.drawCentredString(w/2, y, f"{data['district']}, {data['province']}")
+        y -= 15
+    if data.get('ward'): 
+        c.drawCentredString(w/2, y, f"वडा नं. {data['ward']} को कार्यालय")
+        y -= 15
     
     # Horizontal line
-    c.setStrokeColorRGB(0, 0, 0)
-    c.setLineWidth(1)
-    c.line(0.75 * inch, height - 1.6 * inch, width - 0.75 * inch, height - 1.6 * inch)
+    y -= 5
+    c.line(margin_left, y, w - margin_right, y)
+    y -= 20
+    
+    # Date (right aligned)
+    c.setFont(font, 10)
+    date_text = f"मिति: {convert_to_bikram_sambat(datetime.now().strftime('%Y-%m-%d'))}"
+    c.drawRightString(w - margin_right, y, date_text)
+    y -= 20
     
     # Subject
-    c.setFont(font_name, 12)
-    subject = f"विषय: {get_document_subject(document_type)}"
-    c.drawString(inch, height - 1.9 * inch, subject)
+    c.setFont(font, 12)
+    subject_map = {
+        'birth_registration': 'जन्म दर्ता निवेदन',
+        'death_registration': 'मृत्यु दर्ता निवेदन',
+        'marriage_registration': 'विवाह दर्ता निवेदन',
+        'divorce_registration': 'सम्बन्ध विच्छेद निवेदन',
+        'electricity_connection': 'विद्युत जडान निवेदन',
+        'water_connection': 'खानेपानी जडान निवेदन',
+        'migration_certificate': 'बसाइसराई प्रमाणपत्र निवेदन',
+        'residence_certificate': 'बसोबास प्रमाणपत्र निवेदन',
+        'road_access': 'बाटो निकासा निवेदन'
+    }
+    subject = subject_map.get(dtype, dtype.replace('_', ' ').title())
+    c.drawString(margin_left, y, f"विषय: {subject}")
+    y -= 25
     
-    # Date on the right TOTTTTTTTT
-    date_bs = convert_to_bikram_sambat(datetime.now().strftime('%Y-%m-%d'))
-    c.setFont(font_name, 10)
-    c.drawRightString(width - inch, height - 1.9 * inch, f"मिति: {date_bs}")
-
-    # Body contenttt
-    c.setFont(font_name, 11)
-    y_position = height - 2.3 * inch
+    # Body content
+    c.setFont(font, 11)
+    wrapped_lines = _wrap_nepali_text(content, max_chars=50)
     
-    lines = content.split('\n')
-    for line in lines:
-        if line.strip():
-            # Nepali text wrapping: use ~55 chars per line for proper fit
-            wrapped_lines = textwrap.wrap(line, width=55) if len(line) > 55 else [line]
-            for wrapped_line in wrapped_lines:
-                if y_position < 2.5 * inch:
-                    # New page
-                    c.showPage()
-                    c.setFont(font_name, 11)
-                    y_position = height - inch
-                c.drawString(inch, y_position, wrapped_line)
-                y_position -= 0.22 * inch
-        else:
-            y_position -= 0.12 * inch
+    for line in wrapped_lines:
+        # Check if we need a new page
+        if y < margin_bottom + 100:  # Leave room for footer
+            c.showPage()
+            c.setFont(font, 11)
+            y = h - margin_top
+        
+        c.drawString(margin_left, y, line)
+        y -= line_height
+        
+        # Extra space after empty lines (paragraph breaks)
+        if not line.strip():
+            y -= 8
     
-    # Signature at bottom
-    if y_position < 3.5 * inch:
+    # Footer section - ensure enough space
+    footer_space_needed = 80
+    if y < margin_bottom + footer_space_needed:
         c.showPage()
-        c.setFont(font_name, 11)
-        y_position = height - inch
+        c.setFont(font, 11)
+        y = h - margin_top - 50
     
-    sig_y = 2.2 * inch
-    c.setFont(font_name, 10)
+    y = max(y - 30, margin_bottom + 60)
     
-    # Left applicant
-    c.drawString(inch, sig_y + 0.3 * inch, "..............................")
-    c.drawString(inch, sig_y, "निवेदकको हस्ताक्षर")
+    # Signature lines
+    c.drawString(margin_left, y, "..................")
+    c.drawString(margin_left, y - 15, "निवेदक")
     
-    # Right authority  
-    c.drawString(width - 3 * inch, sig_y + 0.3 * inch, "..............................")
-    c.drawString(width - 3 * inch, sig_y, "प्रमाणिकरण अधिकारी")
-    
-    # Bottom line
-    c.setFont(font_name, 8)
-    c.drawCentredString(width / 2, 0.5 * inch, "यो दस्तावेज सरकारी-सारथी AI Digital Scribe मार्फत उत्पन्न गरिएको हो।")
+    c.drawRightString(w - margin_right, y, "..................")
+    c.drawRightString(w - margin_right, y - 15, "अधिकृत")
     
     c.save()
-    logger.info(f"PDF generated: {filepath}")
-    return filepath
-
-def get_document_subject(document_type: str) -> str:
-    """Get Nepali subject line for document type"""
-    subjects = {
-        "birth_registration": "जन्म दर्ताको निवेदन",
-        "death_registration": "मृत्यु दर्ताको निवेदन", 
-        "marriage_registration": "विवाह दर्ताको निवेदन",
-        "migration_certificate": "बसाइसराई प्रमाणपत्रको निवेदन",
-        "residence_certificate": "बसोबास प्रमाणपत्रको निवेदन",
-        "electricity_connection": "विद्युत जडानको निवेदन",
-        "water_connection": "खानेपानी जडानको निवेदन",
-        "road_access": "बाटो पहुँचको निवेदन"
-    }
-    return subjects.get(document_type, "निवेदन")
-
-@app.get("/download-document/{filename}")
-async def download_document(filename: str):
-    """Download generated document"""
-    file_path = os.path.join(BASE_DIR, "generated_documents", filename)
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="Document not found")
-    
-    return FileResponse(file_path, media_type='application/pdf', filename=filename)
-
-@app.get("/templates")
-async def list_templates():
-    """List loaded template keys (for debugging)."""
-    return {"loaded": list(templates.keys()), "count": len(templates)}
-
-
-@app.get("/document-types")
-async def get_document_types():
-    """Get available document types"""
-    return {
-        "document_types": list(templates.keys()),
-        "categories": {
-            "civil_registration": ["birth_registration", "death_registration", "marriage_registration", "divorce_registration"],
-            "recommendation": ["migration_certificate", "residence_certificate"],
-            "infrastructure": ["electricity_connection", "water_connection", "road_access"]
-        }
-    }
+    return fpath
 
 @app.get("/locations")
-async def get_locations():
-    """Get Nepal administrative division data"""
-    try:
-        location_file = os.path.join(BASE_DIR, "locations.json")
-        if os.path.exists(location_file):
-            with open(location_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {"error": "Locations file not found"}
-    except Exception as e:
-        logger.error(f"Error serving locations: {e}")
-        raise HTTPException(status_code=500, detail="Error loading location data")
+def locations():
+    f = os.path.join(BASE_DIR, "locations.json")
+    if os.path.exists(f): 
+        with open(f, 'r', encoding='utf-8') as data: return json.load(data)
+    return {}
 
-@app.get("/template/{document_type}")
-async def get_template(document_type: str):
-    """Get pattern definition for a specific document type"""
-    if document_type not in templates:
-        raise HTTPException(status_code=404, detail="Template not found")
-    return templates[document_type]
+@app.get("/document-types")
+def dtypes(): return {"document_types": list(templates.keys())}
+
+@app.get("/template/{dtype}")
+def get_templ(dtype: str): return templates.get(dtype, {})
+
+@app.get("/download-document/{fname}")
+def dl_doc(fname: str):
+    p = os.path.join(BASE_DIR, "generated_documents", fname)
+    if os.path.exists(p): return FileResponse(p, filename=fname)
+    raise HTTPException(404)
 
 if __name__ == "__main__":
-    import socket
-    import sys
-    
-    # Find available port starting from 8000
-    def find_available_port(start_port=8000):
-        for port in range(start_port, start_port + 10):
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.bind(('localhost', port))
-                    s.close()
-                    return port
-            except OSError:
-                continue
-        return None
-    
-    available_port = find_available_port()
-    if available_port:
-        print(f"Starting server on port {available_port}")
-        print(f"API docs at: http://localhost:{available_port}/docs")
-        uvicorn.run(app, host="0.0.0.0", port=available_port)
-    else:
-        print("❌ No available ports found in range 8000-8010")
-        print("Please close some applications and try again")
-        sys.exit(1)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
