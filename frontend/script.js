@@ -977,7 +977,9 @@ function clearModalCanvas() {
         var ctx = canvas.getContext('2d');
         ctx.clearRect(0, 0, canvas.width, canvas.height);
     }
-    // Also clear stroke capture for offline recognition
+    // Also clear stroke capture for offline recognition.
+    // NOTE: OfflineHandwriting is an optional/future integration and may be
+    // provided by an external script. When not defined, this block is a no-op.
     if (typeof OfflineHandwriting !== 'undefined') {
         OfflineHandwriting.clearCanvasStrokes('modalCanvas');
     }
