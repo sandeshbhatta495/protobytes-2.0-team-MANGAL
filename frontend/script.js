@@ -1,8 +1,15 @@
+// =====================================================
+//  SARKARI-SARATHI — FIELD-CENTRIC INPUT ARCHITECTURE
+//  Every form field has a single internal state.
+//  All input methods (keyboard, voice, handwriting)
+//  write to that same state → always Nepali output.
+// =====================================================
+
+// ===== GLOBAL VARIABLES =====
 let currentStep = 1;
 let selectedDocument = null;
 let selectedInputMethod = 'text';
 let formData = {};
-
 
 // Field-centric state store
 const fieldStates = {};
@@ -13,6 +20,12 @@ let isModalDrawing = false;
 let modalLastX = 0;
 let modalLastY = 0;
 
+// CNN alternatives state
+let pendingAlternatives = [];
+let selectedWordIndex = 0;
+let lastRecognitionResult = null;
+
+// ===== API BASE URL =====
 function getApiBase() {
     var o = window.location.origin;
     var path = window.location.pathname || '';
@@ -22,7 +35,6 @@ function getApiBase() {
     var host = window.location.hostname || 'localhost';
     return (o && o.indexOf('https') === 0 ? 'https' : 'http') + '://' + host + ':8000';
 }
-
 const API_BASE = getApiBase();
 
 // =====================================================
@@ -45,7 +57,7 @@ class FieldState {
         this.translitBuffer = '';
     }
 
-/** Set the field value from any source and sync to DOM */
+    /** Set the field value from any source and sync to DOM */
     setValue(newValue, source) {
         this.value = newValue;
         if (this.element) {
@@ -55,7 +67,8 @@ class FieldState {
         }
         console.log(`[FieldState] ${this.fieldId} = "${newValue}" (source: ${source || 'unknown'})`);
     }
-   /** Append text (e.g. from voice transcription) */
+
+    /** Append text (e.g. from voice transcription) */
     appendValue(text, source) {
         const sep = this.value ? ' ' : '';
         this.setValue(this.value + sep + text, source);
@@ -82,17 +95,51 @@ function getOrCreateFieldState(fieldId, element, label) {
 //  CLIENT-SIDE TRANSLITERATION (English → Nepali)
 // =====================================================
 const TRANSLIT_MULTI = {
-    'shri': 'श्री', 'shr': 'श्र', 'ksh': 'क्ष', 'tra': 'त्र', 'gya': 'ज्ञ',
-    'chh': 'छ', 'thh': 'ठ', 'dhh': 'ढ', 'shh': 'ष',
-    'kha': 'खा', 'gha': 'घा', 'cha': 'चा', 'chha': 'छा',
-    'jha': 'झा', 'tha': 'था', 'dha': 'धा', 'pha': 'फा',
-    'bha': 'भा', 'sha': 'शा',
-    'kh': 'ख', 'gh': 'घ', 'ng': 'ङ',
-    'ch': 'च', 'jh': 'झ', 'ny': 'ञ',
-    'th': 'थ', 'dh': 'ध', 'ph': 'फ',
-    'bh': 'भ', 'sh': 'श',
-    'aa': 'ा', 'ee': 'ी', 'oo': 'ू', 'ai': 'ै', 'au': 'ौ',
-    'ou': 'ौ', 'ei': 'ै'
+    // Conjuncts and special combinations
+    'shri': 'श्री', 'shree': 'श्री',
+    'kshya': 'क्ष्य', 'ksha': 'क्षा', 'ksh': 'क्ष',
+    'gya': 'ज्ञ', 'dnya': 'ज्ञ', 'gnya': 'ज्ञ',
+    'tra': 'त्र', 'tri': 'त्रि', 'tru': 'त्रु',
+    'dra': 'द्र', 'dri': 'द्रि',
+    'pra': 'प्र', 'pri': 'प्रि',
+    'bra': 'ब्र', 'bri': 'ब्रि',
+    'shr': 'श्र', 'shra': 'श्रा',
+    'ntr': 'न्त्र', 'ndr': 'न्द्र',
+    'str': 'स्त्र', 'sta': 'स्ता',
+    'sth': 'स्थ', 'stha': 'स्था',
+    'sna': 'स्ना', 'swa': 'स्वा', 'sw': 'स्व',
+    'tth': 'त्थ', 'ddh': 'द्ध',
+    'nch': 'न्च', 'nj': 'न्ज', 'nd': 'न्द', 'nt': 'न्त',
+    'mp': 'म्प', 'mb': 'म्ब',
+    'ng': 'ङ', 'nk': 'ङ्क',
+    'rya': 'र्य', 'ryu': 'र्यु',
+    // Aspirated consonants with vowels
+    'chha': 'छा', 'chhi': 'छि', 'chhu': 'छु', 'chhe': 'छे', 'chho': 'छो',
+    'chh': 'छ',
+    'kha': 'खा', 'khi': 'खि', 'khu': 'खु', 'khe': 'खे', 'kho': 'खो',
+    'kh': 'ख',
+    'gha': 'घा', 'ghi': 'घि', 'ghu': 'घु', 'ghe': 'घे', 'gho': 'घो',
+    'gh': 'घ',
+    'cha': 'चा', 'chi': 'चि', 'chu': 'चु', 'che': 'चे', 'cho': 'चो',
+    'ch': 'च',
+    'jha': 'झा', 'jhi': 'झि', 'jhu': 'झु', 'jhe': 'झे', 'jho': 'झो',
+    'jh': 'झ',
+    'tha': 'था', 'thi': 'थि', 'thu': 'थु', 'the': 'थे', 'tho': 'थो',
+    'th': 'थ',
+    'dha': 'धा', 'dhi': 'धि', 'dhu': 'धु', 'dhe': 'धे', 'dho': 'धो',
+    'dh': 'ध',
+    'pha': 'फा', 'phi': 'फि', 'phu': 'फु', 'phe': 'फे', 'pho': 'फो',
+    'ph': 'फ',
+    'bha': 'भा', 'bhi': 'भि', 'bhu': 'भु', 'bhe': 'भे', 'bho': 'भो',
+    'bh': 'भ',
+    'sha': 'शा', 'shi': 'शि', 'shu': 'शु', 'she': 'शे', 'sho': 'शो',
+    'sh': 'श',
+    'ny': 'ञ',
+    // Vowel combinations
+    'aa': 'ा', 'ee': 'ी', 'ii': 'ी', 'oo': 'ू', 'uu': 'ू',
+    'ai': 'ै', 'au': 'ौ', 'ou': 'ौ', 'ei': 'ै',
+    // Retroflex
+    'tt': 'ट', 'tth': 'ठ', 'dd': 'ड', 'ddh': 'ढ', 'nn': 'ण'
 };
 const TRANSLIT_VOWEL_STANDALONE = { 'a': 'अ', 'i': 'इ', 'u': 'उ', 'e': 'ए', 'o': 'ओ' };
 const TRANSLIT_VOWEL_MATRA = { 'a': '', 'i': 'ि', 'u': 'ु', 'e': 'े', 'o': 'ो' };
@@ -104,21 +151,35 @@ const TRANSLIT_CONSONANT = {
 };
 const DEVANAGARI_DIGITS = '०१२३४५६७८९';
 const TRANSLIT_WORDS = {
+    // Personal names and relations
     'name': 'नाम', 'first': 'पहिलो', 'last': 'थर', 'ram': 'राम',
-    'sita': 'सिता', 'hari': 'हरि', 'kumar': 'कुमार', 'shrestha': 'श्रेष्ठ',
+    'sita': 'सीता', 'hari': 'हरि', 'kumar': 'कुमार', 'shrestha': 'श्रेष्ठ',
     'sharma': 'शर्मा', 'thapa': 'थापा', 'tamang': 'तामाङ', 'gurung': 'गुरुङ',
-    'magar': 'मगर', 'rai': 'राई', 'limbu': 'लिम्बु', 'nepal': 'नेपाल',
-    'kathmandu': 'काठमाडौं', 'pokhara': 'पोखरा', 'lalitpur': 'ललितपुर',
-    'bhaktapur': 'भक्तपुर', 'biratnagar': 'बिराटनगर',
-    'male': 'पुरुष', 'female': 'महिला', 'other': 'अन्य',
-    'married': 'विवाहित', 'unmarried': 'अविवाहित', 'single': 'एकल',
-    'hindu': 'हिन्दू', 'buddhist': 'बौद्ध', 'muslim': 'मुस्लिम', 'christian': 'ईसाई',
-    'nepali': 'नेपाली', 'father': 'बुबा', 'mother': 'आमा',
-    'son': 'छोरा', 'daughter': 'छोरी', 'husband': 'पति', 'wife': 'पत्नी',
-    'grandfather': 'हजुरबुबा', 'grandmother': 'हजुरआमा',
+    'magar': 'मगर', 'rai': 'राई', 'limbu': 'लिम्बु', 'newar': 'नेवार',
     'bahadur': 'बहादुर', 'prasad': 'प्रसाद', 'devi': 'देवी', 'maya': 'माया',
     'laxmi': 'लक्ष्मी', 'krishna': 'कृष्ण', 'shiva': 'शिव', 'ganesh': 'गणेश',
-    'bir': 'बिर', 'dal': 'दल', 'jit': 'जित'
+    'bir': 'बिर', 'dal': 'दल', 'jit': 'जित',
+    // Family relations
+    'father': 'बुबा', 'mother': 'आमा', 'son': 'छोरा', 'daughter': 'छोरी',
+    'husband': 'पति', 'wife': 'पत्नी', 
+    'grandfather': 'हजुरबुबा', 'grandmother': 'हजुरआमा',
+    'brother': 'दाजु', 'sister': 'दिदी',
+    // Places
+    'nepal': 'नेपाल', 'kathmandu': 'काठमाडौं', 'pokhara': 'पोखरा', 
+    'lalitpur': 'ललितपुर', 'bhaktapur': 'भक्तपुर', 'biratnagar': 'बिराटनगर',
+    // Gender and status
+    'male': 'पुरुष', 'female': 'महिला', 'other': 'अन्य',
+    'married': 'विवाहित', 'unmarried': 'अविवाहित', 'single': 'एकल',
+    // Religion
+    'hindu': 'हिन्दू', 'buddhist': 'बौद्ध', 'muslim': 'मुस्लिम', 'christian': 'ईसाई',
+    'nepali': 'नेपाली',
+    // Administrative terms
+    'province': 'प्रदेश', 'district': 'जिल्ला', 'ward': 'वडा',
+    'municipality': 'नगरपालिका', 'village': 'गाउँ', 'address': 'ठेगाना',
+    'date': 'मिति', 'year': 'वर्ष', 'month': 'महिना', 'day': 'दिन',
+    // Document types
+    'birth': 'जन्म', 'death': 'मृत्यु', 'marriage': 'विवाह', 'divorce': 'सम्बन्ध विच्छेद',
+    'application': 'निवेदन', 'certificate': 'प्रमाणपत्र', 'registration': 'दर्ता'
 };
 
 /** Transliterate a single English word/phrase to Nepali Devanagari */
@@ -171,6 +232,7 @@ function clientTransliterate(text) {
     }
     return result.join('');
 }
+
 // =====================================================
 //  NEPALI TEXT VALIDATION
 // =====================================================
@@ -188,6 +250,11 @@ function isNepaliText(text) {
     return (nepaliCount / cleaned.length) >= 0.5;
 }
 
+// Helper to check if a field is for English input (should NOT be transliterated)
+function isEnglishField(fieldId) {
+    return fieldId && (fieldId.endsWith('_en') || fieldId.endsWith('_english') || fieldId.toLowerCase().includes('english'));
+}
+
 function validateAllFieldsNepali() {
     const issues = [];
     const form = document.getElementById('documentForm');
@@ -195,8 +262,8 @@ function validateAllFieldsNepali() {
     form.querySelectorAll('input[type="text"], textarea').forEach(input => {
         const id = input.id || '';
         const name = input.name || '';
-        // Skip fields that are explicitly marked as English variants (e.g., child_name_en)
-        if (id.endsWith('_en') || name.endsWith('_en')) {
+        // Skip fields that are explicitly marked as English variants
+        if (isEnglishField(id) || isEnglishField(name)) {
             return;
         }
         const val = input.value.trim();
@@ -244,6 +311,16 @@ document.addEventListener('DOMContentLoaded', function () {
         loadInitialData();
         setupEventListeners();
         setupModalCanvas();
+        
+        // Initialize Tesseract.js for handwriting recognition (async, non-blocking)
+        if (typeof TesseractHandwriting !== 'undefined' && TesseractHandwriting.isAvailable()) {
+            console.log('[Init] Pre-loading Tesseract.js OCR engine...');
+            TesseractHandwriting.init().then(function() {
+                console.log('[Init] Tesseract.js ready for handwriting recognition');
+            }).catch(function(err) {
+                console.warn('[Init] Tesseract.js init failed:', err);
+            });
+        }
     } catch (err) {
         console.error('App init error:', err);
     }
@@ -343,7 +420,6 @@ async function loadDocumentTemplate(documentType) {
     }
 }
 
-
 // Global location data
 var locationData = null;
 var locationDataPromise = null;
@@ -392,7 +468,11 @@ async function loadLocationData() {
                             province_name: p['प्रदेश_नाम'],
                             districts: (p['जिल्लाहरू'] || []).map(function (d) {
                                 var municipalities = (d['स्थानीय_तहहरू'] || []).map(function (m) {
-                                    return { name: m.name || m['नाम'], type: m.type || m['प्रकार'], wards: m.wards || m['वडा'] };
+                                    // Handle both plain string entries and object entries
+                                    if (typeof m === 'string') {
+                                        return { name: m };
+                                    }
+                                    return { name: m.name || m['नाम'] || '', type: m.type || m['प्रकार'], wards: m.wards || m['वडा'] };
                                 });
                                 return { district_name: d['जिल्ला_नाम'], municipalities: municipalities };
                             })
@@ -497,6 +577,9 @@ function createFieldElement(field, container) {
 
     // Determine if this is a text-type field that should get the input toolbar
     var isTextField = (field.type === 'text' || field.type === 'textarea') && field.type !== 'select';
+    
+    // Check if this field should skip transliteration (English fields)
+    var skipTranslit = isEnglishField(field.id);
 
     var input;
     if (field.type === 'select') {
@@ -564,18 +647,22 @@ function createFieldElement(field, container) {
         fieldDiv.appendChild(toolbar);
         fieldDiv.appendChild(input);
 
-        // Transliteration hint (shows preview as user types English)
-        var hint = document.createElement('div');
-        hint.id = 'hint_' + field.id;
-        hint.className = 'transliteration-hint';
-        hint.style.display = 'none';
-        fieldDiv.appendChild(hint);
+        // Transliteration hint (shows preview as user types English) - skip for English fields
+        if (!skipTranslit) {
+            var hint = document.createElement('div');
+            hint.id = 'hint_' + field.id;
+            hint.className = 'transliteration-hint';
+            hint.style.display = 'none';
+            fieldDiv.appendChild(hint);
+        }
 
         // Register in field state store
         getOrCreateFieldState(field.id, input, field.label);
 
-        // Setup inline keyboard transliteration
-        setupFieldTransliteration(field.id, input);
+        // Setup inline keyboard transliteration - skip for English fields
+        if (!skipTranslit) {
+            setupFieldTransliteration(field.id, input);
+        }
     } else {
         fieldDiv.appendChild(input);
     }
@@ -880,6 +967,8 @@ function closeFieldCanvas() {
         setFieldMode(activeCanvasFieldId, 'typing');
     }
     activeCanvasFieldId = null;
+    // Reset alternatives UI
+    resetAlternativesUI();
 }
 
 function clearModalCanvas() {
@@ -888,6 +977,12 @@ function clearModalCanvas() {
         var ctx = canvas.getContext('2d');
         ctx.clearRect(0, 0, canvas.width, canvas.height);
     }
+    // Also clear stroke capture for offline recognition
+    if (typeof OfflineHandwriting !== 'undefined') {
+        OfflineHandwriting.clearCanvasStrokes('modalCanvas');
+    }
+    // Reset alternatives when canvas is cleared
+    resetAlternativesUI();
 }
 
 async function submitFieldCanvas() {
@@ -916,48 +1011,61 @@ async function submitFieldCanvas() {
     var fieldId = activeCanvasFieldId;
 
     try {
-        var imageData64 = canvas.toDataURL('image/png');
-        console.log('[Handwriting] Sending canvas image for recognition, field:', fieldId);
+        var recognizedText = '';
+        var serverResult = null;
+        
+        // ── Strategy: Try server API first (CNN or Tesseract) ──────────────
+        try {
+            var imageData64 = canvas.toDataURL('image/png');
+            console.log('[Handwriting] Sending to server API...');
 
-        var response = await fetch(API_BASE + '/recognize-handwriting', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ image: imageData64 })
-        });
+            var response = await fetch(API_BASE + '/recognize-handwriting', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ image: imageData64 })
+            });
 
-        var result = await response.json();
-        console.log('[Handwriting] Server response:', result);
+            serverResult = await response.json();
+            console.log('[Handwriting] Server response:', serverResult);
 
-        if (response.ok && result.text) {
-            var recognizedText = result.text.trim();
-            if (recognizedText) {
-                // Apply grammar correction
-                var correctedText = await correctNepaliGrammar(recognizedText, fieldId);
-
-                var state = fieldStates[fieldId];
-                if (state) {
-                    state.setValue(correctedText, 'handwriting');
-                    console.log('[Handwriting] Field', fieldId, 'set to:', correctedText);
-                } else {
-                    // Fallback: directly set the DOM element
-                    var inputEl = document.getElementById(fieldId);
-                    if (inputEl) {
-                        inputEl.value = correctedText;
-                        inputEl.dispatchEvent(new Event('change', { bubbles: true }));
-                        inputEl.dispatchEvent(new Event('input', { bubbles: true }));
-                        console.log('[Handwriting] Direct DOM set for', fieldId, ':', correctedText);
-                    }
+            if (response.ok && serverResult.text && serverResult.text.trim().length > 0) {
+                recognizedText = serverResult.text.trim();
+                lastRecognitionResult = serverResult;
+                
+                // If CNN returned alternatives, show them for user selection
+                if (serverResult.method === 'cnn' && serverResult.alternatives && serverResult.alternatives.length > 0) {
+                    hideLoading();
+                    showAlternatives(serverResult);
+                    return; // Wait for user to select
                 }
-                showSuccess('हस्तलेख पहिचान सफल!');
-                closeFieldCanvas();
-            } else {
-                showError('पाठ पहिचान गर्न सकेन। कृपया स्पष्ट रूपमा लेख्नुहोस्।');
             }
-        } else if (response.status === 503) {
-            showError('AI मोडेल उपलब्ध छैन। GEMINI_API_KEY सेट गर्नुहोस्।');
+        } catch (serverError) {
+            console.warn('[Handwriting] Server API unavailable:', serverError.message);
+        }
+        
+        // ── Fallback: Client-side Tesseract.js ──────────────────────────────
+        if (!recognizedText && typeof TesseractHandwriting !== 'undefined' && TesseractHandwriting.isAvailable()) {
+            try {
+                console.log('[Handwriting] Using Tesseract.js OCR (fallback)');
+                showToast('हस्तलेख पहिचान गर्दै... (पहिलो पटक केही समय लाग्छ)', 'info');
+                
+                var ocrResult = await TesseractHandwriting.recognize(canvas);
+                if (ocrResult && ocrResult.success && ocrResult.text && ocrResult.text.length > 0) {
+                    recognizedText = ocrResult.text.trim();
+                    console.log('[Handwriting] Tesseract.js result:', recognizedText, 'confidence:', ocrResult.confidence);
+                } else if (ocrResult && !ocrResult.success) {
+                    console.warn('[Handwriting] Tesseract.js failed:', ocrResult.error);
+                }
+            } catch (ocrError) {
+                console.warn('[Handwriting] Tesseract.js error:', ocrError);
+            }
+        }
+        
+        // ── Apply result to field ───────────────────────────────────────────
+        if (recognizedText) {
+            await applyRecognizedText(recognizedText, fieldId);
         } else {
-            var detail = result.detail || 'Recognition failed';
-            showError('हस्तलेख पहिचान गर्न सकेन: ' + detail);
+            showError('हस्तलेख पहिचान गर्न सकेन। कृपया स्पष्ट लेख्नुहोस् वा किबोर्ड प्रयोग गर्नुहोस्।');
         }
     } catch (error) {
         console.error('[Handwriting] Error:', error);
@@ -965,6 +1073,121 @@ async function submitFieldCanvas() {
     } finally {
         hideLoading();
     }
+}
+
+/** Show CNN alternatives for user selection */
+function showAlternatives(result) {
+    var section = document.getElementById('alternativesSection');
+    var list = document.getElementById('alternativesList');
+    var badge = document.getElementById('recognitionConfidence');
+    var recognizeBtn = document.getElementById('recognizeBtn');
+    var confirmBtn = document.getElementById('confirmWordBtn');
+    
+    if (!section || !list) return;
+    
+    // Build alternatives array: main result + top alternatives
+    pendingAlternatives = [{ word: result.text, confidence: result.confidence }];
+    if (result.alternatives) {
+        result.alternatives.forEach(function(alt) {
+            if (alt.word !== result.text) {
+                pendingAlternatives.push(alt);
+            }
+        });
+    }
+    
+    // Show confidence badge
+    var conf = Math.round((result.confidence || 0) * 100);
+    var confClass = conf >= 70 ? 'confidence-high' : (conf >= 40 ? 'confidence-medium' : 'confidence-low');
+    badge.className = 'confidence-badge ' + confClass;
+    badge.textContent = conf + '%';
+    
+    // Render alternative buttons
+    list.innerHTML = '';
+    pendingAlternatives.forEach(function(alt, idx) {
+        var btn = document.createElement('button');
+        btn.className = 'alternative-btn' + (idx === 0 ? ' selected' : '');
+        btn.textContent = alt.word;
+        btn.title = Math.round((alt.confidence || 0) * 100) + '% विश्वास';
+        btn.onclick = function() { selectAlternative(idx); };
+        list.appendChild(btn);
+    });
+    
+    selectedWordIndex = 0;
+    
+    // Show/hide buttons
+    section.classList.remove('hidden');
+    if (recognizeBtn) recognizeBtn.classList.add('hidden');
+    if (confirmBtn) confirmBtn.classList.remove('hidden');
+}
+
+/** User selects an alternative word */
+function selectAlternative(idx) {
+    selectedWordIndex = idx;
+    var list = document.getElementById('alternativesList');
+    if (!list) return;
+    
+    Array.from(list.children).forEach(function(btn, i) {
+        btn.classList.toggle('selected', i === idx);
+    });
+}
+
+/** Confirm the selected word and apply to field */
+async function confirmSelectedWord() {
+    if (pendingAlternatives.length === 0) return;
+    
+    var selectedWord = pendingAlternatives[selectedWordIndex].word;
+    var fieldId = activeCanvasFieldId;
+    
+    showLoading();
+    await applyRecognizedText(selectedWord, fieldId);
+    hideLoading();
+    
+    // Reset UI
+    resetAlternativesUI();
+    closeFieldCanvas();
+}
+
+/** Apply recognized text to field with grammar correction */
+async function applyRecognizedText(text, fieldId) {
+    // Skip grammar correction for English fields
+    var correctedText = text;
+    if (!isEnglishField(fieldId)) {
+        correctedText = await correctNepaliGrammar(text, fieldId);
+    }
+
+    var state = fieldStates[fieldId];
+    if (state) {
+        state.setValue(correctedText, 'handwriting');
+        console.log('[Handwriting] Field', fieldId, 'set to:', correctedText);
+    } else {
+        // Fallback: directly set the DOM element
+        var inputEl = document.getElementById(fieldId);
+        if (inputEl) {
+            inputEl.value = correctedText;
+            inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+            inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+            console.log('[Handwriting] Direct DOM set for', fieldId, ':', correctedText);
+        }
+    }
+    showSuccess('हस्तलेख पहिचान सफल!');
+    closeFieldCanvas();
+}
+
+/** Reset alternatives UI state */
+function resetAlternativesUI() {
+    var section = document.getElementById('alternativesSection');
+    var list = document.getElementById('alternativesList');
+    var recognizeBtn = document.getElementById('recognizeBtn');
+    var confirmBtn = document.getElementById('confirmWordBtn');
+    
+    if (section) section.classList.add('hidden');
+    if (list) list.innerHTML = '';
+    if (recognizeBtn) recognizeBtn.classList.remove('hidden');
+    if (confirmBtn) confirmBtn.classList.add('hidden');
+    
+    pendingAlternatives = [];
+    selectedWordIndex = 0;
+    lastRecognitionResult = null;
 }
 
 /** Call server to correct Nepali grammar */
@@ -995,6 +1218,12 @@ function setupModalCanvas() {
     var canvas = document.getElementById('modalCanvas');
     if (!canvas) return;
     var ctx = canvas.getContext('2d');
+
+    // Setup stroke capture for offline recognition
+    if (typeof OfflineHandwriting !== 'undefined') {
+        OfflineHandwriting.setupCanvasCapture('modalCanvas');
+        console.log('[Handwriting] Stroke capture initialized for offline recognition');
+    }
 
     canvas.addEventListener('mousedown', function (e) {
         isModalDrawing = true;
@@ -1277,8 +1506,41 @@ function showDocumentPreview(content) {
         previewDiv.innerHTML = html;
     } else {
         var sanitized = String(content || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        previewDiv.innerHTML = '<div class="bg-gray-50 p-6 rounded-lg"><h3 class="text-lg font-semibold mb-4">दस्तावेज पूर्वावलोकन</h3><div class="bg-white p-4 rounded border" style="line-height:1.8"><pre class="whitespace-pre-wrap text-sm">' + sanitized + '</pre></div></div>';
+        previewDiv.innerHTML = '<div class="bg-gray-50 p-6 rounded-lg"><h3 class="text-lg font-semibold mb-4">दस्तावेज पूर्वावलोकन</h3><div id="printablePreview" class="bg-white p-4 rounded border" style="line-height:1.8"><pre class="whitespace-pre-wrap text-sm" style="font-family: \'Noto Sans Devanagari\', \'Mangal\', \'Preeti\', sans-serif;">' + sanitized + '</pre></div></div>';
     }
+}
+
+/** Print the preview directly using browser's Print to PDF - preserves Nepali formatting */
+function printPreviewAsPDF() {
+    var previewContent = document.getElementById('printablePreview');
+    if (!previewContent) {
+        previewContent = document.getElementById('documentPreview');
+    }
+    if (!previewContent) {
+        showError('कृपया पहिले PDF उत्पन्न गर्नुहोस्।');
+        return;
+    }
+    
+    // Create print window with proper styling
+    var printWindow = window.open('', '_blank');
+    printWindow.document.write('<!DOCTYPE html><html><head>');
+    printWindow.document.write('<meta charset="UTF-8">');
+    printWindow.document.write('<title>दस्तावेज प्रिन्ट</title>');
+    printWindow.document.write('<style>');
+    printWindow.document.write('@import url("https://fonts.googleapis.com/css2?family=Noto+Sans+Devanagari:wght@400;500;600;700&display=swap");');
+    printWindow.document.write('* { font-family: "Noto Sans Devanagari", "Mangal", "Arial Unicode MS", sans-serif; }');
+    printWindow.document.write('body { padding: 40px; font-size: 12pt; line-height: 1.8; }');
+    printWindow.document.write('pre { white-space: pre-wrap; word-wrap: break-word; font-family: inherit; }');
+    printWindow.document.write('@media print { body { padding: 20px; } }');
+    printWindow.document.write('</style></head><body>');
+    printWindow.document.write(previewContent.innerHTML);
+    printWindow.document.write('</body></html>');
+    printWindow.document.close();
+    
+    // Wait for fonts to load then print
+    setTimeout(function() {
+        printWindow.print();
+    }, 500);
 }
 
 // =====================================================
@@ -1348,6 +1610,7 @@ window.clearCanvas = clearCanvas;
 window.recognizeHandwriting = recognizeHandwriting;
 window.generatePDF = generatePDF;
 window.downloadPDF = downloadPDF;
+window.printPreviewAsPDF = printPreviewAsPDF;
 window.startNew = startNew;
 window.rateService = rateService;
 window.submitFeedback = submitFeedback;
@@ -1355,6 +1618,8 @@ window.openFieldCanvas = openFieldCanvas;
 window.closeFieldCanvas = closeFieldCanvas;
 window.clearModalCanvas = clearModalCanvas;
 window.submitFieldCanvas = submitFieldCanvas;
+window.selectAlternative = selectAlternative;
+window.confirmSelectedWord = confirmSelectedWord;
 window.goToStep = goToStep;
 window.goToStepSafe = goToStepSafe;
 window.goBackToForm = goBackToForm;
