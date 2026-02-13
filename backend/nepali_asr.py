@@ -4,23 +4,47 @@ Optimized to use HuggingFace pipeline chunking for long audio.
 """
 import sys
 import os
+import unicodedata
+import re
+import shutil
 
-# Configure FFmpeg path from imageio_ffmpeg before importing audio libraries
-try:
-    import imageio_ffmpeg
-    import shutil
-    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-    ffmpeg_dir = os.path.dirname(ffmpeg_exe)
-    # Create a copy named ffmpeg.exe if it doesn't exist (libraries look for 'ffmpeg')
-    ffmpeg_standard = os.path.join(ffmpeg_dir, "ffmpeg.exe")
-    if not os.path.exists(ffmpeg_standard) and os.path.exists(ffmpeg_exe):
-        shutil.copy2(ffmpeg_exe, ffmpeg_standard)
-    os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
-    os.environ["FFMPEG_BINARY"] = ffmpeg_standard if os.path.exists(ffmpeg_standard) else ffmpeg_exe
-except ImportError:
-    pass  # FFmpeg should be in system PATH
+# Configure FFmpeg path BEFORE importing transformers
+# This is critical because transformers checks for ffmpeg on import
+def setup_ffmpeg():
+    """Ensure FFmpeg is available in PATH for audio processing"""
+    try:
+        import imageio_ffmpeg
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        ffmpeg_dir = os.path.dirname(ffmpeg_exe)
+        
+        # The imageio_ffmpeg binary has a non-standard name, create a copy named 'ffmpeg.exe'
+        ffmpeg_standard = os.path.join(ffmpeg_dir, "ffmpeg.exe")
+        if not os.path.exists(ffmpeg_standard):
+            shutil.copy2(ffmpeg_exe, ffmpeg_standard)
+            print(f"[FFmpeg] Created standard binary: {ffmpeg_standard}")
+        
+        # Prepend to PATH so it's found first
+        current_path = os.environ.get("PATH", "")
+        if ffmpeg_dir not in current_path:
+            os.environ["PATH"] = ffmpeg_dir + os.pathsep + current_path
+        
+        # Also set FFMPEG_BINARY for libraries that check this
+        os.environ["FFMPEG_BINARY"] = ffmpeg_standard
+        
+        print(f"[FFmpeg] Configured: {ffmpeg_standard}")
+        return True
+    except ImportError:
+        print("[FFmpeg] imageio_ffmpeg not installed, trying system ffmpeg")
+        return False
+    except Exception as e:
+        print(f"[FFmpeg] Setup error: {e}")
+        return False
+
+# Run FFmpeg setup immediately
+setup_ffmpeg()
 
 import textwrap
+import numpy as np
 from transformers import pipeline
 import torch
 import logging
@@ -64,6 +88,45 @@ class NepaliASR:
         self.pipe = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.logger = logging.getLogger(__name__)
+    
+    def _normalize_nepali_text(self, text):
+        """
+        Post-process transcription: Unicode normalize, add punctuation, clean up.
+        """
+        if not text:
+            return ""
+        
+        # 1. Unicode NFC normalization
+        text = unicodedata.normalize('NFC', text.strip())
+        
+        # 2. Basic cleanup - remove repeated words (common ASR artifact)
+        words = text.split()
+        cleaned_words = []
+        prev_word = None
+        for word in words:
+            if word != prev_word:
+                cleaned_words.append(word)
+            prev_word = word
+        text = ' '.join(cleaned_words)
+        
+        # 3. Punctuation restoration (rule-based)
+        # Add danda (।) at the end of sentences if needed
+        # Look for natural sentence endings
+        sentence_endings = r'(छ|छु|छन्|छौं|हो|थियो|भयो|गर्छ|गर्छु|गर्नुहोस्|हुन्छ|पर्छ|गर्दछु|भएको|गरेको)(\s|$)'
+        
+        # Add danda after sentence-ending verbs if not already there
+        text = re.sub(sentence_endings, r'\1।\2', text)
+        
+        # 4. Clean up multiple dandas
+        text = re.sub(r'।{2,}', '।', text)
+        
+        # 5. Ensure space after danda (except at end)
+        text = re.sub(r'।([^\s।])', r'। \1', text)
+        
+        # 6. Remove trailing space before final punctuation
+        text = re.sub(r'\s+([।?!])$', r'\1', text)
+        
+        return text.strip()
         
     def load_model(self):
         """Load the Nepali ASR model"""
@@ -120,6 +183,9 @@ class NepaliASR:
                 transcription = " ".join([chunk.get('text', '') for chunk in result])
             else:
                 transcription = str(result)
+            
+            # Apply post-processing: Unicode normalization and punctuation
+            transcription = self._normalize_nepali_text(transcription)
             
             return transcription.strip()
             
@@ -191,6 +257,7 @@ def get_nepali_asr():
     if nepali_asr_instance is None:
         nepali_asr_instance = NepaliASR()
     return nepali_asr_instance
+
 # CLI usage for testing
 if __name__ == '__main__':
     if len(sys.argv) != 2:
@@ -212,5 +279,3 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"Transcription failed: {e}")
         sys.exit(1)
-
-
