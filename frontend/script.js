@@ -139,7 +139,7 @@ const TRANSLIT_MULTI = {
     'aa': 'ा', 'ee': 'ी', 'ii': 'ी', 'oo': 'ू', 'uu': 'ू',
     'ai': 'ै', 'au': 'ौ', 'ou': 'ौ', 'ei': 'ै',
     // Retroflex
-    'tt': 'ट', 'tth': 'ठ', 'dd': 'ड', 'ddh': 'ढ', 'nn': 'ण'
+    'tt': 'ट', 'Tth': 'ठ', 'dd': 'ड', 'ddh': 'ढ', 'nn': 'ण'
 };
 const TRANSLIT_VOWEL_STANDALONE = { 'a': 'अ', 'i': 'इ', 'u': 'उ', 'e': 'ए', 'o': 'ओ' };
 const TRANSLIT_VOWEL_MATRA = { 'a': '', 'i': 'ि', 'u': 'ु', 'e': 'े', 'o': 'ो' };
