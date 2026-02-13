@@ -89,7 +89,7 @@
       "required": false
     }
   ],
-  "content": "माननीय वडा अध्यक्षज्यू,\n\nवडा नं. {ward}\n{municipality}\n{district}\n{province}\n\nविषय: जन्म दर्ताको निवेदन\n\nमेरो सन्तान {child_name} ({child_name_en}) को जन्म भएको {dob} मा स्थान {birth_place} मा भएको हो।\n\nविवरण:\n\n१. सन्तानको नाम: {child_name} ({child_name_en})\n२. जन्म मिति: {dob}\n३. जन्म स्थान: {birth_place}\n४. पिताको नाम: {father_name}\n५. माताको नाम: {mother_name}\n६. हजुरबाको नाम: {grandfather_name}\n७. हजुरआमाको नाम: {grandmother_name}\n८. स्थायी ठेगाना: {province}, {district}, {municipality}, वडा नं. {ward}\n\nयस्तो, माथि उल्लिखित विवरण अनुसार मेरो सन्तानको जन्म दर्ता गरिदिनुहुन विनम्र निवेदन गर्दछु।\n\nनिवेदक,\n{father_name}\n{mother_name}\nसम्पर्क: [सम्पर्क नं.]\n\nमिति: {date_bs}",
+  "content": "माननीय वडा अध्यक्षज्यू,\n\nवडा नं. {ward}\n{municipality}\n{district}\n{province}\n\nविषय: जन्म दर्ताको निवेदन\n\nमेरो सन्तान {child_name} ({child_name_en}) को जन्म मिति {dob} मा {birth_place} मा भएको हो।\n\nविवरण:\n\n१. सन्तानको नाम: {child_name} ({child_name_en})\n२. जन्म मिति: {dob}\n३. जन्म स्थान: {birth_place}\n४. पिताको नाम: {father_name}\n५. माताको नाम: {mother_name}\n६. हजुरबाको नाम: {grandfather_name}\n७. हजुरआमाको नाम: {grandmother_name}\n८. स्थायी ठेगाना: {province}, {district}, {municipality}, वडा नं. {ward}\n\nमाथि उल्लिखित विवरण अनुसार मेरो सन्तानको जन्म दर्ता गरिदिनुहुन विनम्र निवेदन गर्दछु।\n\nनिवेदक,\n{father_name}\n{mother_name}\n\nमिति: {date_bs}",
   "instructions": [
     "बच्चाको पूरा नाम नेपाली र अंग्रेजी दुवैमा लेख्नुहोस्",
     "जन्म मिति बिक्रम सम्वत् र इस्वी संवत् दुवैमा उल्लेख गर्नुहोस्",
