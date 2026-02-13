@@ -1525,6 +1525,11 @@ function printPreviewAsPDF() {
     
     // Create print window with proper styling
     var printWindow = window.open('', '_blank');
+    if (!printWindow) {
+        // Popup was blocked by the browser
+        showError('तपाईंको ब्राउजरले प्रिन्ट विन्डो खोल्न रोक्यो। कृपया popup अनुमति दिनुहोस् र पुनः प्रयास गर्नुहोस्।');
+        return;
+    }
     printWindow.document.write('<!DOCTYPE html><html><head>');
     printWindow.document.write('<meta charset="UTF-8">');
     printWindow.document.write('<title>दस्तावेज प्रिन्ट</title>');
