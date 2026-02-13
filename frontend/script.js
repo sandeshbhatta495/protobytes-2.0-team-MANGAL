@@ -1544,10 +1544,22 @@ function printPreviewAsPDF() {
     printWindow.document.write('</body></html>');
     printWindow.document.close();
     
-    // Wait for fonts to load then print
-    setTimeout(function() {
-        printWindow.print();
-    }, 500);
+    // Wait for fonts to load in the new window before printing
+    if (printWindow.document.fonts && printWindow.document.fonts.ready) {
+        printWindow.document.fonts.ready.then(function () {
+            printWindow.print();
+        }).catch(function () {
+            // Fallback in case fonts.ready rejects
+            setTimeout(function () {
+                printWindow.print();
+            }, 2000);
+        });
+    } else {
+        // Fallback for browsers without document.fonts
+        setTimeout(function () {
+            printWindow.print();
+        }, 2000);
+    }
 }
 
 // =====================================================
