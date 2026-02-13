@@ -470,7 +470,7 @@ async function loadLocationData() {
                                 var municipalities = (d['स्थानीय_तहहरू'] || []).map(function (m) {
                                     // Handle both plain string entries and object entries
                                     if (typeof m === 'string') {
-                                        return { name: m };
+                                        return { name: m, type: '', wards: 0 };
                                     }
                                     return { name: m.name || m['नाम'] || '', type: m.type || m['प्रकार'], wards: m.wards || m['वडा'] };
                                 });
