@@ -1539,8 +1539,34 @@ function printPreviewAsPDF() {
     printWindow.document.write('body { padding: 40px; font-size: 12pt; line-height: 1.8; }');
     printWindow.document.write('pre { white-space: pre-wrap; word-wrap: break-word; font-family: inherit; }');
     printWindow.document.write('@media print { body { padding: 20px; } }');
+    printWindow.document.write('table { width: 100%; border-collapse: collapse; } td { padding: 8px; border-bottom: 1px solid #ddd; }');
     printWindow.document.write('</style></head><body>');
-    printWindow.document.write(previewContent.innerHTML);
+    
+    // Safely extract and write content to avoid XSS
+    // Use textContent for plain text or clone and sanitize for structured content
+    var contentToWrite = '';
+    if (previewContent.querySelector('table')) {
+        // For table content, safely extract text from each cell
+        var table = previewContent.querySelector('table');
+        var rows = table.querySelectorAll('tr');
+        contentToWrite = '<table>';
+        for (var i = 0; i < rows.length; i++) {
+            var cells = rows[i].querySelectorAll('td');
+            contentToWrite += '<tr>';
+            for (var j = 0; j < cells.length; j++) {
+                var cellText = cells[j].textContent || '';
+                contentToWrite += '<td>' + escapeHtml(cellText) + '</td>';
+            }
+            contentToWrite += '</tr>';
+        }
+        contentToWrite += '</table>';
+    } else {
+        // For text content, safely escape and wrap in pre
+        var textContent = previewContent.textContent || '';
+        contentToWrite = '<pre>' + escapeHtml(textContent) + '</pre>';
+    }
+    
+    printWindow.document.write(contentToWrite);
     printWindow.document.write('</body></html>');
     printWindow.document.close();
     
