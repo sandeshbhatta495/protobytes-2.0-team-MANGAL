@@ -1,0 +1,7 @@
+{
+  "max_seq_length": 256,
+  "max_label_length": 64,
+  "input_dim": 3,
+  "vocab_size": 119,
+  "model_version": "1.0.0-placeholder"
+}
